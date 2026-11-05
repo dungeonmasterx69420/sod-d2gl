@@ -855,7 +855,10 @@ void FirstPerson::update(bool active)
 		// The game keeps one flag per panel in an array; d2gl's esc_menu_open is its entry 9
 		// (help_menu_open is entry 0x21 and skill_menu_open entry 3 of the same array).
 		const uint32_t* flags = (const uint32_t*)d2::esc_menu_open - 9;
-		static const uint8_t panels[] = { 0x01, 0x02, 0x04, 0x05, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x21 };
+		// Not 0x10 and 0x11: those are the buttons the game flashes for new stat points and a
+		// changed quest log, not panels. With them here, the mouse stopped turning the view on
+		// entering the Den of Evil, where the quest log button comes up.
+		static const uint8_t panels[] = { 0x01, 0x02, 0x04, 0x05, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x13, 0x14, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x21 };
 		for (const uint8_t id : panels)
 			panel = panel || flags[id] != 0;
 	}
@@ -1132,8 +1135,9 @@ void FirstPerson::rebuildWorld()
 
 	const TileWorld& tile_world = TileWorld::Instance();
 	for (const auto& room : rooms) {
-		if (tile_world.covers(room.x, room.y, room.w, room.h))
-			continue; // drawn from its own tiles
+		// A room drawn from its own tiles needs nothing from here but the walls those tiles do not
+		// have: in a cave the rock is painted into the floor, and there is no wall tile to stand up.
+		const bool tiled = tile_world.covers(room.x, room.y, room.w, room.h);
 		LevelArt& art = levelArt(room.level);
 		const int wall_level = wallArtLevel(room.level);
 		const LevelArt* wall = wall_level >= 0 ? &g_level_art[wall_level] : nullptr;
@@ -1144,7 +1148,7 @@ void FirstPerson::rebuildWorld()
 		};
 
 		// ---- floors and low blocks: runs along x, cut at tile borders so each piece lies in one tile ----
-		for (int y = 0; y < room.h; y++) {
+		for (int y = 0; y < room.h && !tiled; y++) {
 			int x = 0;
 			while (x < room.w) {
 				const uint8_t cls = room.cls[y * room.w + x];
@@ -1229,7 +1233,7 @@ void FirstPerson::rebuildWorld()
 		};
 
 		const int dirs[4][2] = { { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } };
-		for (int pass = 0; pass < 2; pass++) // 0: walls, 1: low obstacles
+		for (int pass = 0; pass < (tiled ? 1 : 2); pass++) // 0: walls, 1: low obstacles
 		for (const auto& dir : dirs) {
 			const int nx = dir[0], nz = dir[1];
 			const bool along_x = nz != 0;
@@ -1245,6 +1249,8 @@ void FirstPerson::rebuildWorld()
 						const int x = along_x ? b : a, y = along_x ? a : b;
 						const uint8_t here = room.cls[y * room.w + x], there = at(x + nx, y + nz);
 						face = pass == 0 ? here == CELL_WALL && isOpen(there) : here == CELL_LOW && (there == CELL_FLOOR || there == CELL_ALT);
+						if (face && tiled && tile_world.standing(floorDiv(room.x + x), floorDiv(room.y + y)))
+							face = false; // the game's own wall stands here
 					}
 					const bool boundary = ((base + b) % TILE + TILE) % TILE == 0;
 					if (start >= 0 && (!face || boundary)) {
@@ -1645,7 +1651,13 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			case 2: half = 0.6f, height = 1.4f, color = { 0.62f, 0.50f, 0.28f }; break; // objects
 			case 3: half = 0.25f, height = 0.5f, base = 2.0f, color = { 1.0f, 0.85f, 0.35f }; break; // missiles
 			case 4: half = 0.3f, height = 0.3f, color = { 0.85f, 0.85f, 0.95f }; break; // items on the ground
-			case 5: half = 1.0f, height = 5.0f, color = { 0.45f, 0.25f, 0.75f }; break; // exits
+			case 5: // exits: a slim marker where the map tiles already show the cave mouth or the stairs
+				if (tiles.covers((int)ux, (int)uz, 1, 1))
+					half = 0.3f, height = 2.4f;
+				else
+					half = 1.0f, height = 5.0f;
+				color = { 0.45f, 0.25f, 0.75f };
+				break;
 			default: continue;
 		}
 		if (targeted)

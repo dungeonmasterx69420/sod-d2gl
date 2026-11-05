@@ -360,8 +360,10 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 
 	// into the atlas, with a border: the picture's own edge for floors, nothing for the rest
 	int page = 0, px = 0, py = 0;
-	if (!place(w + 2, h + 2, &page, &px, &py))
+	if (!place(w + 2, h + 2, &page, &px, &py)) {
+		m_atlas_full = true;
 		return art;
+	}
 	uint8_t* pixels = m_pages[page].pixels.data();
 	for (int y = -1; y <= h; y++) {
 		uint32_t* row = (uint32_t*)(pixels + ((size_t)(py + 1 + y) * PAGE + px) * 4);
@@ -389,6 +391,7 @@ void TileWorld::clearScene()
 		list.clear();
 	m_uprights.clear();
 	m_rects.clear();
+	m_standing.clear();
 	m_signature = 0;
 	m_version++;
 }
@@ -514,6 +517,8 @@ void TileWorld::capture(bool active)
 		list.clear();
 	m_uprights.clear();
 	m_rects.clear();
+	m_standing.clear();
+	const auto stands = [&](int tx, int ty) { m_standing.insert(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)); };
 
 	static std::unordered_set<uint64_t> placed;
 	static std::unordered_map<uint32_t, int> layers;
@@ -543,10 +548,18 @@ void TileWorld::capture(bool active)
 					it = m_art.find(entry.tile);
 				}
 				const Art& art = it->second;
+				const int tx = info.coords[4] + entry.tx, ty = info.coords[5] + entry.ty;
+				if (tile.dwOrientation != 0 && tile.dwOrientation != 10 && tile.dwOrientation != 11 && tile.dwOrientation != 13) {
+					// a wall also keeps the tile across its edge clear of walls built from the collision map
+					stands(tx, ty);
+					if (art.kind == 1)
+						stands(tx, ty - 1);
+					else if (art.kind == 2)
+						stands(tx - 1, ty);
+				}
 				if (!art.valid)
 					continue;
 
-				const int tx = info.coords[4] + entry.tx, ty = info.coords[5] + entry.ty;
 				const uint64_t key = ((uint64_t)entry.tile << 32) | (uint64_t)(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF));
 				if (!placed.insert(key).second)
 					continue; // rooms share the tiles on their border
@@ -644,6 +657,20 @@ void TileWorld::capture(bool active)
 	}
 	m_signature = signature;
 	m_version++;
+
+	// The atlas holds the pictures of every room walked through since it was started. When it
+	// is full, start it over: the next pass fills it with what the rooms here need. Not more
+	// often than every ten seconds, in case that alone does not fit.
+	if (m_atlas_full) {
+		m_atlas_full = false;
+		if (now - m_atlas_reset_at > 10000) {
+			m_atlas_reset_at = now;
+			m_art.clear();
+			m_pages.clear();
+			m_reset_textures = true;
+			m_signature = 0;
+		}
+	}
 }
 
 void TileWorld::sync()
@@ -718,6 +745,7 @@ void TileWorld::sync()
 	glBufferData(GL_ARRAY_BUFFER, m_scratch.size() * sizeof(Vertex), m_scratch.data(), GL_STATIC_DRAW);
 	m_gl_uprights = m_uprights;
 	m_gl_rects = m_rects;
+	m_gl_standing = m_standing;
 	m_gl_version = m_version;
 	trace_log("FirstPerson: map tiles rebuilt (%u rooms, %u vertices, %u uprights, %u atlas pages).", (uint32_t)m_gl_rects.size(), (uint32_t)m_scratch.size(), (uint32_t)m_gl_uprights.size(), (uint32_t)m_pages.size());
 

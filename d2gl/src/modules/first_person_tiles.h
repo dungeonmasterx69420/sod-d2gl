@@ -19,6 +19,7 @@
 #pragma once
 
 #include <mutex>
+#include <unordered_set>
 
 namespace d2gl::modules {
 
@@ -84,6 +85,8 @@ private:
 	uint32_t m_palette_hash = 0;
 	uint32_t m_signature = 0;
 	DWORD m_next_try = 0;
+	bool m_atlas_full = false; // a picture did not fit: start the atlas over with what is needed now
+	DWORD m_atlas_reset_at = 0;
 	std::unordered_map<uintptr_t, Art> m_art;
 	std::unordered_map<std::string, std::vector<uint8_t>> m_files;
 
@@ -92,6 +95,7 @@ private:
 	std::vector<Vertex> m_flat[MAX_PAGES]; // floors and walls, by page
 	std::vector<Upright> m_uprights;
 	std::vector<Rect> m_rects;
+	std::unordered_set<uint32_t> m_standing; // tiles with a wall, a tree or a roof of the game's own
 	uint32_t m_version = 0;
 	bool m_reset_textures = false;
 
@@ -102,6 +106,7 @@ private:
 	uint32_t m_first[MAX_PAGES] = { 0 }, m_count[MAX_PAGES] = { 0 };
 	std::vector<Upright> m_gl_uprights;
 	std::vector<Rect> m_gl_rects;
+	std::unordered_set<uint32_t> m_gl_standing;
 	std::vector<Vertex> m_scratch;
 
 	void clearScene();
@@ -128,6 +133,10 @@ public:
 	uint32_t coverage() const { return m_gl_version; }
 	// True when the room with this subtile rectangle is drawn here.
 	bool covers(int x, int y, int w, int h) const;
+	// True when the game has put a wall, a tree or a roof on this tile (tile coordinates). Where it
+	// has not, what blocks the way is painted into the floor (the rock of a cave), and the caller
+	// builds the wall from the collision map.
+	bool standing(int tx, int ty) const { return m_gl_standing.count(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)) != 0; }
 	// Draws with the caller's program bound. `yaw` turns the uprights (trees, posts) to the camera.
 	void draw(GLint u_textured, GLint u_texture, int texture_unit, float yaw);
 };
