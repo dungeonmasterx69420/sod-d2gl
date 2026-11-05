@@ -588,6 +588,7 @@ void FirstPerson::traceEnd(uint32_t vertices)
 	const glm::ivec2 cursor = d2::getCursorPos();
 	fprintf(file, "first person frame=%d looking=%d panel=%u game=%ux%u cursor=(%d,%d) vertices=%u records=%u\n", (int)m_frame_active, (int)m_look,
 		*d2::screen_shift, App.game.size.x, App.game.size.y, cursor.x, cursor.y, vertices, (uint32_t)m_trace.size());
+	fprintf(file, "camera yaw=%.5f pitch=%.5f player=(%.3f,%.3f)\n", (float)m_yaw, (float)m_pitch, (float)m_player_x, (float)m_player_y);
 
 	// summary: calls per stage and function
 	uint32_t counts[6][14] = {};
@@ -1100,19 +1101,32 @@ void FirstPerson::rebuildWorld()
 						pushQuadUV(floor_art[room.level], p, uv, shades);
 					} else
 						pushQuad(plain, { x0, 0, z0 }, { x1, 0, z0 }, { x1, 0, z1 }, { x0, 0, z1 }, cls == CELL_ALT ? alt_color : floor_color, 1.0f);
-				} else if (cls == CELL_LOW)
-					pushBox(plain, x0, z0, x1, z1, 0.0f, LOW_HEIGHT, low_color);
+				} else if (cls == CELL_LOW) {
+					// the top of a low obstacle (fence, rubble, hedge); its sides are faces, like the walls'
+					if (wall && !wall->wall_tiles[0].empty()) {
+						const ArtTile& t = weighted(wall->wall_tiles[0], wall->wall_total[0], hash3(tx, ty, 91));
+						const float fx0 = (x0 - tx * TILE) / TILE, fx1 = (x1 - tx * TILE) / TILE;
+						const float fz0 = (z0 - ty * TILE) / TILE, fz1 = (z1 - ty * TILE) / TILE;
+						const float u0 = (t.x + fx0 * t.w) / wall->wall_w, u1 = (t.x + fx1 * t.w) / wall->wall_w;
+						const float v0 = (t.y + t.h * (0.45f + 0.5f * fz0)) / wall->wall_h, v1 = (t.y + t.h * (0.45f + 0.5f * fz1)) / wall->wall_h;
+						const glm::vec3 p[4] = { { x0, LOW_HEIGHT, z0 }, { x1, LOW_HEIGHT, z0 }, { x1, LOW_HEIGHT, z1 }, { x0, LOW_HEIGHT, z1 } };
+						const glm::vec2 uv[4] = { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } };
+						const float shades[4] = { 0.95f, 0.95f, 0.95f, 0.95f };
+						pushQuadUV(wall_art[wall_level], p, uv, shades);
+					} else
+						pushQuad(plain, { x0, LOW_HEIGHT, z0 }, { x1, LOW_HEIGHT, z0 }, { x1, LOW_HEIGHT, z1 }, { x0, LOW_HEIGHT, z1 }, low_color, 1.0f);
+				}
 				x = end;
 			}
 		}
 
 		// ---- walls: one face wherever a wall cell borders an open cell, cut at tile borders ----
 		// axis 0: faces along x (normal +-z).  axis 1: faces along y (normal +-x).
-		const auto emit = [&](int axis, int sign, int line, int s0, int s1) {
+		const auto emit = [&](int axis, int sign, int line, int s0, int s1, float height) {
 			const auto p = [&](float s, float y) { return axis == 0 ? glm::vec3(s, y, (float)line) : glm::vec3((float)line, y, s); };
 			const float face = axis == 0 ? 0.92f : 0.74f;
 			if (!wall || wall->wall_tiles[axis].empty()) {
-				pushQuad(plain, p((float)s0, 0), p((float)s1, 0), p((float)s1, WALL_HEIGHT), p((float)s0, WALL_HEIGHT), wall_color, face);
+				pushQuad(plain, p((float)s0, 0), p((float)s1, 0), p((float)s1, height), p((float)s0, height), height < WALL_HEIGHT ? low_color : wall_color, face);
 				return;
 			}
 
@@ -1121,21 +1135,21 @@ void FirstPerson::rebuildWorld()
 			// texture direction so the art reads left to right from the open side
 			const bool flip = axis == 0 ? sign < 0 : sign > 0;
 			const float ua = flip ? 1.0f - f0 : f0, ub = flip ? 1.0f - f1 : f1;
-			const int blocks = wall->wall_square ? (int)ceilf(WALL_HEIGHT / SQUARE - 1e-4f) : 1;
+			const int blocks = wall->wall_square ? (int)ceilf(height / SQUARE - 1e-4f) : 1;
 			for (int k = 0; k < blocks; k++) {
 				const ArtTile& t = weighted(wall->wall_tiles[axis], wall->wall_total[axis], hash3(along, line * 2 + (sign > 0 ? 1 : 0), (axis == 0 ? 31 : 57) + k));
 				const float u_a = (t.x + ua * t.w) / wall->wall_w, u_b = (t.x + ub * t.w) / wall->wall_w;
 				float y0, y1, v_bottom, v_top;
 				if (wall->wall_square) {
 					y0 = k * SQUARE;
-					y1 = glm::min(WALL_HEIGHT, (k + 1) * SQUARE);
+					y1 = glm::min(height, (k + 1) * SQUARE);
 					v_bottom = (t.y + t.h) / wall->wall_h;
 					v_top = (t.y + t.h * (1.0f - (y1 - y0) / SQUARE)) / wall->wall_h;
 				} else {
 					y0 = 0.0f;
-					y1 = WALL_HEIGHT;
+					y1 = height;
 					v_bottom = (t.y + t.h) / wall->wall_h;
-					v_top = t.y / wall->wall_h;
+					v_top = (t.y + t.h * (1.0f - height / WALL_HEIGHT)) / wall->wall_h; // a low face shows the foot of the wall art
 				}
 				const float bottom = face * (0.62f + 0.38f * (y0 / WALL_HEIGHT)), top = face * (0.62f + 0.38f * (y1 / WALL_HEIGHT));
 				const glm::vec3 corners[4] = { p((float)s0, y0), p((float)s1, y0), p((float)s1, y1), p((float)s0, y1) };
@@ -1146,6 +1160,7 @@ void FirstPerson::rebuildWorld()
 		};
 
 		const int dirs[4][2] = { { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } };
+		for (int pass = 0; pass < 2; pass++) // 0: walls, 1: low obstacles
 		for (const auto& dir : dirs) {
 			const int nx = dir[0], nz = dir[1];
 			const bool along_x = nz != 0;
@@ -1159,11 +1174,12 @@ void FirstPerson::rebuildWorld()
 					bool face = false;
 					if (b < inner) {
 						const int x = along_x ? b : a, y = along_x ? a : b;
-						face = room.cls[y * room.w + x] == CELL_WALL && isOpen(at(x + nx, y + nz));
+						const uint8_t here = room.cls[y * room.w + x], there = at(x + nx, y + nz);
+						face = pass == 0 ? here == CELL_WALL && isOpen(there) : here == CELL_LOW && (there == CELL_FLOOR || there == CELL_ALT);
 					}
 					const bool boundary = ((base + b) % TILE + TILE) % TILE == 0;
 					if (start >= 0 && (!face || boundary)) {
-						emit(axis, sign, line, base + start, base + b);
+						emit(axis, sign, line, base + start, base + b, pass == 0 ? WALL_HEIGHT : LOW_HEIGHT);
 						start = -1;
 					}
 					if (face && start < 0)
