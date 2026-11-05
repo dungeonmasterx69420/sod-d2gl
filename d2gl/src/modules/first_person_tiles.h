@@ -50,8 +50,10 @@ private:
 		int kind = 0;       // 0 floor, 1 wall across x (stands on a line of constant y), 2 wall across y, 3 upright, 4 roof
 		int page = 0;
 		int x = 0, y = 0, w = 0, h = 0; // rectangle in the page
-		int left = 0;       // the picture's first column, in tile pixels (0..159)
-		int base = 0;       // upright: rows of the picture below the ground line
+		int left = 0;       // the picture's first column, in tile pixels (0..159); upright: from the tile's middle
+		int low = 0;        // upright: rows the picture reaches below the line it stands on (negative: it hangs above)
+		int foot = 0;       // upright: the column it stands on (the middle of its lowest rows), from the tile's middle
+		uint32_t orientation = 0, main = 0;
 		// what the game's record said when this was made, to notice a reused address
 		uint32_t data_offset = 0, name_hash = 0;
 	};
@@ -59,9 +61,14 @@ private:
 		float x, z;   // where it stands
 		float w, h;   // size, subtiles
 		float cx;     // centre of the picture, right of the standing point
-		float base;   // how far the picture reaches below the ground
+		float bottom; // the picture's lower edge above the ground
 		int page;
 		float u0, v0, u1, v1;
+	};
+	// an upright picture placed on a tile, before the halves of one thing are joined
+	struct Piece {
+		int tx, ty;
+		const Art* art;
 	};
 	struct Page {
 		std::vector<uint8_t> pixels; // PAGE * PAGE * 4

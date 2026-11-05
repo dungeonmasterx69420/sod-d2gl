@@ -344,8 +344,19 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 		for (int y = 0; y < h; y++)
 			memcpy(&out[(size_t)y * w], &image[(size_t)(r0 + y) * TILE_W + c0], (size_t)w * 4);
 		art.left = c0 - ax;
-		art.base = glm::max(0, (y0 + r1) - ay);
+		art.low = (y0 + r1) - ay;
+		// what it stands on: the middle of its lowest rows (a trunk, not the whole crown)
+		int f0 = TILE_W, f1 = 0;
+		for (int row = glm::max(r0, r1 - 8); row < r1; row++)
+			for (int x = c0; x < c1; x++)
+				if (image[(size_t)row * TILE_W + x]) {
+					f0 = glm::min(f0, x);
+					f1 = glm::max(f1, x + 1);
+				}
+		art.foot = (f0 + f1) / 2 - ax;
 	}
+	art.orientation = o;
+	art.main = tile.dwMainIndex;
 
 	// into the atlas, with a border: the picture's own edge for floors, nothing for the rest
 	int page = 0, px = 0, py = 0;
@@ -507,8 +518,10 @@ void TileWorld::capture(bool active)
 	static std::unordered_set<uint64_t> placed;
 	static std::unordered_map<uint32_t, int> layers;
 	static std::vector<TileEntry> entries;
+	static std::vector<Piece> pieces;
 	placed.clear();
 	layers.clear();
+	pieces.clear();
 	const float page_size = (float)PAGE;
 
 	for (const auto& info : rooms) {
@@ -562,25 +575,72 @@ void TileWorld::capture(bool active)
 						pushQuad(m_flat[art.page], p, uv, 170);
 					}
 				} else {
-					Upright up;
-					const bool corner = tile.dwOrientation == 7;
-					up.x = x0 + (corner ? 0.0f : 2.5f);
-					up.z = z0 + (corner ? 0.0f : 2.5f);
-					up.w = uw * PX;
-					up.h = vh * PX;
-					up.cx = ((float)art.left + uw * 0.5f) * PX;
-					up.base = (float)art.base * PX;
-					up.page = art.page;
-					up.u0 = (u0 + 0.5f) / page_size;
-					up.v0 = (v0 + 0.5f) / page_size;
-					up.u1 = (u0 + uw - 0.5f) / page_size;
-					up.v1 = (v0 + vh - 0.5f) / page_size;
-					m_uprights.push_back(up);
+					pieces.push_back({ tx, ty, &art });
 				}
 			}
 		}
 		if (floors)
 			m_rects.push_back({ info.coords[0], info.coords[1], info.coords[2], info.coords[3] });
+	}
+
+	// ---- uprights ----
+	// A tree is wider than a tile, and the game keeps it as two halves on tiles that are side by
+	// side on screen: (x, y) and (x + 1, y - 1). Halves of one picture are put back together and
+	// stand on one spot, so that the whole tree turns to the camera as one.
+	std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) {
+		if (a.art->orientation != b.art->orientation)
+			return a.art->orientation < b.art->orientation;
+		if (a.art->name_hash != b.art->name_hash)
+			return a.art->name_hash < b.art->name_hash;
+		if (a.art->main != b.art->main)
+			return a.art->main < b.art->main;
+		if (a.tx + a.ty != b.tx + b.ty)
+			return a.tx + a.ty < b.tx + b.ty;
+		return a.tx - a.ty < b.tx - b.ty;
+	});
+	for (size_t first = 0; first < pieces.size();) {
+		size_t last = first + 1;
+		const auto joins = [&](const Piece& a, const Piece& b) {
+			return a.art->orientation != 7 && a.art->orientation == b.art->orientation && a.art->name_hash == b.art->name_hash && a.art->main == b.art->main
+				&& a.tx + a.ty == b.tx + b.ty && (b.tx - b.ty) - (a.tx - a.ty) == 2;
+		};
+		while (last < pieces.size() && last - first < 4 && joins(pieces[last - 1], pieces[last]))
+			last++;
+
+		// Columns are counted from the middle of the first piece's tile; a tile further right
+		// on screen starts 160 columns on. The group stands where its lowest piece does.
+		const Piece& head = pieces[first];
+		const bool corner = head.art->orientation == 7;
+		int low = INT_MIN, foot = 0;
+		for (size_t i = first; i < last; i++)
+			if (pieces[i].art->low > low) {
+				low = pieces[i].art->low;
+				foot = (int)(i - first) * 160 + pieces[i].art->foot;
+			}
+		if (corner)
+			foot = 0; // a corner post stands on the corner
+		const float lift = low < -24 ? (float)(-low) * PX : 0.0f; // something that hangs stays up; the rest stands on the ground
+		const float along = (float)foot / 32.0f; // a pixel across the screen is 1/32 subtile along x and back along y
+		const float stand_x = (float)(head.tx * TILE) + (corner ? 0.0f : 2.5f) + along;
+		const float stand_z = (float)(head.ty * TILE) + (corner ? 0.0f : 2.5f) - along;
+		for (size_t i = first; i < last; i++) {
+			const Art& art = *pieces[i].art;
+			const float u0 = (float)art.x, v0 = (float)art.y, uw = (float)art.w, vh = (float)art.h;
+			Upright up;
+			up.x = stand_x;
+			up.z = stand_z;
+			up.w = uw * PX;
+			up.h = vh * PX;
+			up.cx = ((float)((int)(i - first) * 160 + art.left - foot) + uw * 0.5f) * PX;
+			up.bottom = (float)(low - art.low) * PX + lift;
+			up.page = art.page;
+			up.u0 = (u0 + 0.5f) / page_size;
+			up.v0 = (v0 + 0.5f) / page_size;
+			up.u1 = (u0 + uw - 0.5f) / page_size;
+			up.v1 = (v0 + vh - 0.5f) / page_size;
+			m_uprights.push_back(up);
+		}
+		first = last;
 	}
 	m_signature = signature;
 	m_version++;
@@ -707,7 +767,7 @@ void TileWorld::draw(GLint u_textured, GLint u_texture, int texture_unit, float 
 					continue;
 				const glm::vec3 foot = glm::vec3(up.x, 0.0f, up.z) + right * up.cx;
 				const glm::vec3 half = right * (up.w * 0.5f);
-				const float bottom = -up.base, top = up.h - up.base;
+				const float bottom = up.bottom, top = up.bottom + up.h;
 				const glm::vec3 p[4] = { foot - half + glm::vec3(0.0f, bottom, 0.0f), foot + half + glm::vec3(0.0f, bottom, 0.0f), foot + half + glm::vec3(0.0f, top, 0.0f),
 					foot - half + glm::vec3(0.0f, top, 0.0f) };
 				const glm::vec2 uv[4] = { { up.u0, up.v1 }, { up.u1, up.v1 }, { up.u1, up.v0 }, { up.u0, up.v0 } };
