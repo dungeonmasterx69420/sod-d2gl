@@ -510,6 +510,7 @@ uniform float u_Textured; // 1 = sample the level art
 uniform float u_Additive; // 1 = drawn with additive blending (glowing missiles)
 uniform sampler2D u_Texture;
 uniform vec4 u_Fog; // rgb = colour, a = far distance
+uniform float u_Sharp; // 1 = keep the art's own pixels crisp when it is drawn larger than it was made
 uniform float u_Flat; // 1 = plain colour (overlay), 2 = text: the colour, with the texture's alpha
 layout(location = 0) out vec4 FragColor;
 void main() {
@@ -523,7 +524,19 @@ void main() {
 	}
 	vec3 color = v_Color.rgb;
 	if (u_Textured > 0.5) {
-		vec4 art = texture(u_Texture, v_TexCoord);
+		// The game's art is small: a monster is some eighty pixels high. Stretched over half the
+		// screen with plain filtering it turns to blur. Here each pixel of the art stays a clean
+		// square, with only its edge smoothed over one pixel of the screen; from further away,
+		// where several pixels of the art fall into one of the screen, it is filtered as before.
+		vec2 uv = v_TexCoord;
+		if (u_Sharp > 0.5) {
+			vec2 size = vec2(textureSize(u_Texture, 0));
+			vec2 at = uv * size;
+			vec2 span = max(fwidth(at), vec2(0.0001));
+			vec2 seam = floor(at + 0.5);
+			uv = (seam + clamp((at - seam) / span, -0.5, 0.5)) / size;
+		}
+		vec4 art = texture(u_Texture, uv);
 		if (art.a < 0.5)
 			discard; // wall art keeps its own outline
 		color = art.rgb * v_Color.rgb * (255.0 / 200.0) * 1.35; // vertex 200 = full brightness; the art is authored dark
@@ -834,7 +847,7 @@ void FirstPerson::notice(const char* text)
 	m_notice_tick = GetTickCount();
 }
 
-// sod-view.ini, in the game's folder: one "fov=<degrees>" line.
+// sod-view.ini, in the game's folder: "fov=<degrees>" and "sharp=<0 or 1>".
 void FirstPerson::loadView()
 {
 	m_view_loaded = true;
@@ -846,6 +859,8 @@ void FirstPerson::loadView()
 		float value = 0.0f;
 		if (sscanf_s(line, "fov=%f", &value) == 1 && value >= 50.0f && value <= 100.0f)
 			m_fov = value;
+		if (sscanf_s(line, "sharp=%f", &value) == 1)
+			m_sharp = value != 0.0f;
 	}
 	fclose(file);
 }
@@ -855,7 +870,7 @@ void FirstPerson::saveView()
 	FILE* file = nullptr;
 	if (fopen_s(&file, "sod-view.ini", "w") != 0 || !file)
 		return;
-	fprintf(file, "fov=%d\n", (int)m_fov);
+	fprintf(file, "fov=%d\nsharp=%d\n", (int)m_fov, m_sharp ? 1 : 0);
 	fclose(file);
 }
 
@@ -886,6 +901,14 @@ void FirstPerson::update(bool active)
 	}
 	m_key_f5 = f5;
 	m_key_f6 = f6;
+	//   Ctrl+F4: crisp pixels up close / smooth
+	const bool f4 = ctrl && keyDown(VK_F4);
+	if (f4 && !m_key_f4) {
+		m_sharp = !m_sharp;
+		saveView();
+		notice(m_sharp ? "CRISP PIXELS" : "SMOOTH PIXELS");
+	}
+	m_key_f4 = f4;
 	const bool f7 = ctrl && keyDown(VK_F7);
 	if (f7 && !m_key_f7) {
 		m_real_tiles = !m_real_tiles;
@@ -1083,6 +1106,7 @@ bool FirstPerson::initGL()
 	m_u_flat = glGetUniformLocation(m_program, "u_Flat");
 	m_u_textured = glGetUniformLocation(m_program, "u_Textured");
 	m_u_additive = glGetUniformLocation(m_program, "u_Additive");
+	m_u_sharp = glGetUniformLocation(m_program, "u_Sharp");
 	m_u_texture = glGetUniformLocation(m_program, "u_Texture");
 
 	GLint prev_vao = 0, prev_vbo = 0;
@@ -1885,6 +1909,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	glUniform4f(m_u_fog, fog.r, fog.g, fog.b, FOG_FAR);
 	glUniform1f(m_u_flat, 0.0f);
 	glUniform1f(m_u_additive, 0.0f);
+	glUniform1f(m_u_sharp, m_sharp ? 1.0f : 0.0f);
 
 	if (m_world_vertex_count) {
 		glBindVertexArray(m_vao_world);

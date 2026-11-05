@@ -50,7 +50,7 @@ class FirstPerson {
 		uint32_t first, count;
 	};
 	std::vector<Batch> m_batches;
-	GLint m_u_textured = -1, m_u_texture = -1, m_u_additive = -1;
+	GLint m_u_textured = -1, m_u_texture = -1, m_u_additive = -1, m_u_sharp = -1;
 	DWORD m_art_retry_time = 0;
 	float m_arms_yaw = 0.0f, m_arms_pitch = 0.0f;
 	bool m_arms_look_valid = false;
@@ -95,6 +95,8 @@ class FirstPerson {
 
 	// ---- field of view (Ctrl+F5 / Ctrl+F6), kept in sod-view.ini next to the game ----
 	volatile float m_fov = 70.0f; // vertical, degrees
+	volatile bool m_sharp = true; // crisp pixels up close (Ctrl+F4), also kept in sod-view.ini
+	bool m_key_f4 = false;
 	bool m_view_loaded = false;
 	// a line shown at the top of the view for a moment (game thread writes, render thread reads)
 	char m_notice[48] = { 0 };
