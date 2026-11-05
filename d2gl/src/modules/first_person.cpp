@@ -1194,6 +1194,11 @@ void FirstPerson::rebuildWorld()
 		// A room drawn from its own tiles needs nothing from here but the walls those tiles do not
 		// have: in a cave the rock is painted into the floor, and there is no wall tile to stand up.
 		const bool tiled = tile_world.covers(room.x, room.y, room.w, room.h);
+		// Without wall art for the level (a cliff at the edge of a desert), such a wall takes the
+		// colour of the ground it rises from rather than a grey that belongs nowhere.
+		glm::vec3 bare_wall = wall_color, earth;
+		if (tiled && tile_world.ground(&earth))
+			bare_wall = glm::min(earth * 1.1f, glm::vec3(1.0f));
 		LevelArt& art = levelArt(room.level);
 		const int wall_level = wallArtLevel(room.level);
 		const LevelArt* wall = wall_level >= 0 ? &g_level_art[wall_level] : nullptr;
@@ -1261,7 +1266,7 @@ void FirstPerson::rebuildWorld()
 			const auto p = [&](float s, float y) { return axis == 0 ? glm::vec3(s, y, (float)line) : glm::vec3((float)line, y, s); };
 			const float face = axis == 0 ? 0.92f : 0.74f;
 			if (!wall || wall->wall_tiles[axis].empty()) {
-				pushQuad(plain, p((float)s0, 0), p((float)s1, 0), p((float)s1, height), p((float)s0, height), height < WALL_HEIGHT ? low_color : wall_color, face);
+				pushQuad(plain, p((float)s0, 0), p((float)s1, 0), p((float)s1, height), p((float)s0, height), height < WALL_HEIGHT ? low_color : bare_wall, face);
 				return;
 			}
 

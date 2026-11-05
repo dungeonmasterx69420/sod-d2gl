@@ -31,7 +31,10 @@ namespace {
 // character that walks through it.
 const float PX = 0.047f;
 const int TILE = 5;         // subtiles along a tile's edge
-const float CEILING = 7.0f; // where an indoor level's ceiling lies: the height of the walls built from the collision map
+// Where an indoor level's ceiling lies: on top of its walls. The walls of a crypt or a sewer are
+// about a man and a half high; a cave has none of its own and gets the height of the walls built
+// from the collision map.
+const float CEILING_MIN = 4.4f, CEILING_MAX = 7.0f;
 const int TILE_W = 160, TILE_H = 80; // a floor tile's diamond, pixels
 
 // Where things are in the game's memory (1.13c).
@@ -273,6 +276,18 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 				filled += out[(size_t)y * w + x] ? 1 : 0;
 			}
 		art.roof = tile.wRoofIndex;
+		{
+			uint64_t sum[3] = { 0, 0, 0 }, count = 0;
+			for (const uint32_t pixel : out)
+				if (pixel) {
+					sum[0] += pixel & 0xFF;
+					sum[1] += (pixel >> 8) & 0xFF;
+					sum[2] += (pixel >> 16) & 0xFF;
+					count++;
+				}
+			for (int k = 0; k < 3 && count; k++)
+				art.avg[k] = (float)sum[k] / (float)count / 255.0f;
+		}
 		if (art.kind == 0 && filled > TILE_W * TILE_H / 2 * 9 / 10) {
 			for (int y = 0; y < h; y++) {
 				uint32_t* row = &out[(size_t)y * w];
@@ -470,7 +485,7 @@ void TileWorld::capture(bool active, bool inside)
 	static std::vector<RoomInfo> rooms;
 	rooms.clear();
 	const auto add = [&](uint32_t ptr) {
-		if (!ptr || rooms.size() >= 64)
+		if (!ptr || rooms.size() >= 112)
 			return;
 		for (const auto& known : rooms)
 			if (known.ptr == ptr)
@@ -488,7 +503,7 @@ void TileWorld::capture(bool active, bool inside)
 	};
 	add(room);
 	size_t begin = 0;
-	for (int depth = 0; depth < 2; depth++) {
+	for (int depth = 0; depth < 3; depth++) { // three rings: about as far as the fog lets you see
 		const size_t end = rooms.size();
 		for (size_t i = begin; i < end; i++) {
 			uint32_t list = 0, count = 0, around[64];
@@ -525,14 +540,25 @@ void TileWorld::capture(bool active, bool inside)
 	m_rects.clear();
 	m_standing.clear();
 	const auto stands = [&](int tx, int ty) { m_standing.insert(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)); };
+	glm::vec3 ground_sum = { 0.0f, 0.0f, 0.0f };
+	int ground_count = 0;
 
 	static std::unordered_set<uint64_t> placed;
 	static std::unordered_map<uint32_t, int> layers;
 	static std::vector<TileEntry> entries;
 	static std::vector<Piece> pieces;
+	struct Ceiling {
+		int page;
+		float x, z;
+		glm::vec2 uv[4];
+	};
+	static std::vector<Ceiling> ceilings;
+	static std::vector<float> wall_heights;
 	placed.clear();
 	layers.clear();
 	pieces.clear();
+	ceilings.clear();
+	wall_heights.clear();
 	const float page_size = (float)PAGE;
 
 	for (const auto& info : rooms) {
@@ -581,11 +607,12 @@ void TileWorld::capture(bool active, bool inside)
 						{ (u0 + 80.0f) / page_size, (v0 + 79.25f) / page_size }, { (u0 + 0.75f) / page_size, (v0 + 40.0f) / page_size } };
 					pushQuad(m_flat[art.page], p, uv, 200);
 					floors++;
-					if (m_inside && layer == 0) {
-						// the ceiling: the same rock overhead, in the dark
-						const glm::vec3 top[4] = { { x0, CEILING, z0 }, { x0 + TILE, CEILING, z0 }, { x0 + TILE, CEILING, z0 + TILE }, { x0, CEILING, z0 + TILE } };
-						pushQuad(m_flat[art.page], top, uv, 95);
+					if (layer == 0) {
+						ground_sum += glm::vec3(art.avg[0], art.avg[1], art.avg[2]);
+						ground_count++;
 					}
+					if (m_inside && layer == 0)
+						ceilings.push_back({ art.page, x0, z0, { uv[0], uv[1], uv[2], uv[3] } }); // laid once the walls' height is known
 				} else if (art.kind == 4) {
 					// a roof, flat at its own height
 					const float y = (float)glm::max(art.roof, 40) * PX;
@@ -595,6 +622,7 @@ void TileWorld::capture(bool active, bool inside)
 					pushQuad(m_flat[art.page], p, uv, 185);
 				} else if (art.kind == 1 || art.kind == 2) {
 					const float height = vh * PX;
+					wall_heights.push_back(height);
 					const float a = (float)(art.left - 80) / 16.0f, b = (float)(art.left + art.w - 80) / 16.0f; // along the edge, from the tile's top corner
 					const glm::vec2 uv[4] = { { (u0 + 0.5f) / page_size, (v0 + vh - 0.5f) / page_size }, { (u0 + uw - 0.5f) / page_size, (v0 + vh - 0.5f) / page_size },
 						{ (u0 + uw - 0.5f) / page_size, (v0 + 0.5f) / page_size }, { (u0 + 0.5f) / page_size, (v0 + 0.5f) / page_size } };
@@ -612,6 +640,23 @@ void TileWorld::capture(bool active, bool inside)
 		}
 		if (floors)
 			m_rects.push_back({ info.coords[0], info.coords[1], info.coords[2], info.coords[3] });
+	}
+
+	m_ground = ground_count ? ground_sum / (float)ground_count : glm::vec3(-1.0f, 0.0f, 0.0f);
+
+	// ---- the ceiling of an indoor level: the floor's own picture overhead, in the dark ----
+	if (!ceilings.empty()) {
+		float height = CEILING_MAX;
+		if (wall_heights.size() >= 8) {
+			// on top of the walls: nearly the tallest, so that a few high pieces (a gate, a pillar) do not lift it
+			const size_t k = wall_heights.size() * 9 / 10;
+			std::nth_element(wall_heights.begin(), wall_heights.begin() + k, wall_heights.end());
+			height = glm::clamp(wall_heights[k], CEILING_MIN, CEILING_MAX);
+		}
+		for (const Ceiling& item : ceilings) {
+			const glm::vec3 top[4] = { { item.x, height, item.z }, { item.x + TILE, height, item.z }, { item.x + TILE, height, item.z + TILE }, { item.x, height, item.z + TILE } };
+			pushQuad(m_flat[item.page], top, item.uv, 95);
+		}
 	}
 
 	// ---- uprights ----
@@ -764,6 +809,7 @@ void TileWorld::sync()
 	m_gl_uprights = m_uprights;
 	m_gl_rects = m_rects;
 	m_gl_standing = m_standing;
+	m_gl_ground = m_ground;
 	m_gl_version = m_version;
 	trace_log("FirstPerson: map tiles rebuilt (%u rooms, %u vertices, %u uprights, %u atlas pages).", (uint32_t)m_gl_rects.size(), (uint32_t)m_scratch.size(), (uint32_t)m_gl_uprights.size(), (uint32_t)m_pages.size());
 

@@ -53,6 +53,7 @@ private:
 		bool valid = false;
 		int kind = 0;       // 0 floor, 1 wall across x (stands on a line of constant y), 2 wall across y, 3 upright, 4 roof
 		int roof = 0;       // roof: how high it lies, pixels
+		float avg[3] = { 0, 0, 0 }; // floor: the picture's average colour, 0..1
 		int page = 0;
 		int x = 0, y = 0, w = 0, h = 0; // rectangle in the page
 		int left = 0;       // the picture's first column, in tile pixels (0..159); upright: from the tile's middle
@@ -101,6 +102,7 @@ private:
 	std::vector<Upright> m_uprights;
 	std::vector<Rect> m_rects;
 	std::unordered_set<uint32_t> m_standing; // tiles with a wall, a tree or a roof of the game's own
+	glm::vec3 m_ground = { -1.0f, 0.0f, 0.0f }; // the average colour of the floors here; r < 0 = none
 	uint32_t m_version = 0;
 	bool m_reset_textures = false;
 
@@ -112,6 +114,7 @@ private:
 	std::vector<Upright> m_gl_uprights;
 	std::vector<Rect> m_gl_rects;
 	std::unordered_set<uint32_t> m_gl_standing;
+	glm::vec3 m_gl_ground = { -1.0f, 0.0f, 0.0f };
 	std::vector<Vertex> m_scratch;
 
 	void clearScene();
@@ -143,6 +146,13 @@ public:
 	// has not, what blocks the way is painted into the floor (the rock of a cave), and the caller
 	// builds the wall from the collision map.
 	bool standing(int tx, int ty) const { return m_gl_standing.count(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)) != 0; }
+	// The colour of the ground in the rooms drawn here, for what the caller builds beside them
+	// without art of its own (a cliff at the edge of a desert). False when there is none.
+	bool ground(glm::vec3* color) const
+	{
+		*color = m_gl_ground;
+		return m_gl_ground.r >= 0.0f;
+	}
 	// Draws with the caller's program bound. `yaw` turns the uprights (trees, posts) to the camera.
 	void draw(GLint u_textured, GLint u_texture, int texture_unit, float yaw);
 };
