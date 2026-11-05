@@ -150,6 +150,8 @@ class Context {
 	std::map<uint32_t, std::pair<uint32_t, BlendType>> m_blend_types;
 	uint32_t m_current_blend_index = 0;
 	bool m_blend_locked = false;
+	bool m_fp_frame = false;
+	bool m_fp_pushed = false;
 
 	glm::vec2 m_bloom_data;
 	glm::uvec2 m_bloom_tex_size = { 0, 0 };
@@ -177,6 +179,7 @@ public:
 	void beginFrame();
 	void bindDefaultFrameBuffer();
 	void presentFrame();
+	void pushFirstPerson();
 
 	inline uint32_t getFrameIndex() { return m_frame_index; }
 	inline CommandBuffer* getCommandBuffer() { return &m_command_buffer[m_frame_index]; }

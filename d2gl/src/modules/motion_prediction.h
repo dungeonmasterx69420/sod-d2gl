@@ -89,6 +89,15 @@ public:
 
 	inline void textMotion(D2DrawFn fn) { m_text_fn = fn; }
 
+	// Smooth positions in game subtiles, advanced every drawn frame (the game itself only moves
+	// units 25 times a second). Units are those the game drew in the last frame.
+	struct PredictedUnit {
+		uint32_t type_id; // id | type << 24
+		float x, y;
+	};
+	bool getPredictedPlayer(glm::vec2* pos);
+	void getPredictedUnits(std::vector<PredictedUnit>& out);
+
 private:
 	void setUnitMotion(UnitMotion* unit_motion, int32_t delta);
 	glm::ivec2 getUnitOffset(UnitMotion* unit_motion);

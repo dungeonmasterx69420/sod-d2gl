@@ -17,6 +17,7 @@
 */
 
 #include "pch.h"
+#include "modules/first_person.h"
 #include "win32.h"
 #include "d2/common.h"
 #include "helpers.h"
@@ -118,6 +119,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (App.ready && Menu::instance().isVisible())
 		ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+
+	if (App.ready && modules::FirstPerson::Instance().onMessage(uMsg, wParam, lParam))
+		return 0;
 
 	switch (uMsg) {
 		case WM_GETMINMAXINFO:

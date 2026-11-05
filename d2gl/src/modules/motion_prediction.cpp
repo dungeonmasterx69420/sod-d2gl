@@ -114,6 +114,25 @@ void MotionPrediction::update()
 	m_global_offset = getUnitOffset(&m_player_motion);
 }
 
+bool MotionPrediction::getPredictedPlayer(glm::vec2* pos)
+{
+	if (!isAvailable() || !m_player_motion.unit)
+		return false;
+
+	*pos = { (float)m_player_motion.predicted_pos.x / 65536.0f, (float)m_player_motion.predicted_pos.y / 65536.0f };
+	return true;
+}
+
+void MotionPrediction::getPredictedUnits(std::vector<PredictedUnit>& out)
+{
+	out.clear();
+	if (!isAvailable())
+		return;
+
+	for (const auto& item : m_units)
+		out.push_back({ item.first, (float)item.second.predicted_pos.x / 65536.0f, (float)item.second.predicted_pos.y / 65536.0f });
+}
+
 glm::ivec2 MotionPrediction::getGlobalOffset(bool skip)
 {
 	if (App.game.draw_stage == DrawStage::World && (!skip || !m_perspective))

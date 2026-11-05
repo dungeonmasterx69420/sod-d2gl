@@ -20,6 +20,7 @@
 #include "context.h"
 #include "d2/common.h"
 #include "helpers.h"
+#include "modules/first_person.h"
 #include "modules/hd_cursor.h"
 #include "modules/hd_text.h"
 #include "modules/mini_map.h"
@@ -441,6 +442,9 @@ void Context::renderThread(void* context)
 					ctx->bindPipeline(ctx->m_game_pipeline, command->index);
 					FrameBuffer::setDrawBuffers(ctx->m_game_framebuffer->getAttachmentCount());
 					break;
+				case CommandType::FirstPerson:
+					modules::FirstPerson::Instance().render(cmd->m_game_size, ctx->m_game_framebuffer->getId(), ctx->m_game_framebuffer->getAttachmentCount());
+					break;
 				case CommandType::Begin:
 					if (cmd->m_screen == GameScreen::Movie) {
 						ctx->bindDefaultFrameBuffer();
@@ -665,6 +669,13 @@ void Context::onStageChange()
 	if (App.game.screen == GameScreen::Movie)
 		return;
 
+	modules::FirstPerson::Instance().traceDraw(100 + (uint8_t)App.game.draw_stage, 0, 0, m_frame.vertex_count);
+	// The world ends where the game starts drawing the automap or its interface. The two cursor
+	// stages are no such boundary: the game reports a cursor change whenever the pointer moves over
+	// something, which can happen while the world is still being drawn.
+	if (App.game.draw_stage == DrawStage::UI || App.game.draw_stage == DrawStage::Map || App.game.draw_stage == DrawStage::HUD)
+		pushFirstPerson();
+
 	switch (App.game.draw_stage) {
 		case DrawStage::World:
 			break;
@@ -710,6 +721,19 @@ void Context::onStageChange()
 	}
 }
 
+// First person: everything the game drew during the world stage is dropped, and one command
+// that renders the 3D view takes its place. Later stages (automap, HUD, panels, cursor) draw on top.
+void Context::pushFirstPerson()
+{
+	if (!m_fp_frame || m_fp_pushed)
+		return;
+
+	m_vertices.ptr -= m_vertices.count; // see flushVertices: dropped vertices take no buffer space
+	m_vertices.count = 0;
+	m_fp_pushed = true;
+	m_command_buffer[m_frame_index].pushCommand(CommandType::FirstPerson);
+}
+
 void Context::setBlendState(uint32_t index)
 {
 	flushVertices();
@@ -737,8 +761,16 @@ void Context::beginFrame()
 	m_frame.drawcall_count = 0;
 
 	App.game.draw_stage = DrawStage::World;
+	m_fp_frame = ISGLIDE3X() && modules::FirstPerson::Instance().isActive();
+	if (ISGLIDE3X()) {
+		modules::FirstPerson::Instance().update(m_fp_frame);
+		modules::FirstPerson::Instance().traceBegin();
+	}
+	m_fp_pushed = false;
 	modules::HDText::Instance().reset();
 	modules::MotionPrediction::Instance().update();
+	if (ISGLIDE3X())
+		modules::FirstPerson::Instance().capturePositions();
 
 	m_command_buffer[m_frame_index].pushCommand(CommandType::Begin);
 }
@@ -752,6 +784,8 @@ void Context::bindDefaultFrameBuffer()
 
 void Context::presentFrame()
 {
+	modules::FirstPerson::Instance().traceEnd(m_frame.vertex_count);
+	pushFirstPerson();
 	flushVertices();
 	setVertexFlagW(0);
 	m_command_buffer[m_frame_index].pushCommand(CommandType::Submit);
@@ -821,6 +855,15 @@ void Context::flushVertices()
 {
 	if (m_vertices.count == 0)
 		return;
+
+	// first person: the isometric world is not drawn
+	if (m_fp_frame && !m_fp_pushed) {
+		// Rewind instead of skipping ahead: only drawn vertices are uploaded (their count is summed
+		// per draw), so a gap here would leave the end of the frame reading stale buffer contents.
+		m_vertices.ptr -= m_vertices.count;
+		m_vertices.count = 0;
+		return;
+	}
 
 	m_command_buffer[m_frame_index].drawIndexed(m_vertices.start, m_vertices.count);
 

@@ -16,6 +16,7 @@
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)src\option\config.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\app.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2gl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2\common.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2\funcs.cpp" />
@@ -91,6 +92,7 @@
   <ItemGroup>
     <ClInclude Include="$(MSBuildThisFileDirectory)src\option\config.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\app.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2gl.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2\common.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2\funcs.h" />
