@@ -18,6 +18,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)src\app.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_sprites.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_tiles.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_viewmodel.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2gl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2\common.cpp" />
@@ -96,6 +97,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)src\app.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_sprites.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_tiles.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_viewmodel.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2gl.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2\common.h" />

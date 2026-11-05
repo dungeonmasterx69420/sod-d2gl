@@ -19,6 +19,7 @@
 #include "pch.h"
 #include "first_person.h"
 #include "first_person_sprites.h"
+#include "first_person_tiles.h"
 #include "first_person_viewmodel.h"
 #include "d2/common.h"
 #include "d2/funcs.h"
@@ -811,6 +812,9 @@ void FirstPerson::capturePositions()
 	else
 		m_pred_units_scratch.clear();
 
+	// the map tiles of the rooms around the player (F7 switches them off, for comparing)
+	TileWorld::Instance().capture(m_frame_active && m_real_tiles);
+
 	std::lock_guard<std::mutex> lock(m_pred_lock);
 	m_pred_player_valid = valid;
 	m_pred_player = player;
@@ -828,6 +832,10 @@ void FirstPerson::update(bool active)
 		toggle();
 	if (f10 && !m_key_f10)
 		m_look_free = !m_look_free;
+	const bool f7 = foreground && keyDown(VK_F7);
+	if (f7 && !m_key_f7)
+		m_real_tiles = !m_real_tiles;
+	m_key_f7 = f7;
 	const bool f8 = foreground && keyDown(VK_F8);
 	if (f8 && !m_key_f8)
 		m_trace_armed = true; // trace the next frame
@@ -1122,7 +1130,10 @@ void FirstPerson::rebuildWorld()
 	floor_art.clear();
 	wall_art.clear();
 
+	const TileWorld& tile_world = TileWorld::Instance();
 	for (const auto& room : rooms) {
+		if (tile_world.covers(room.x, room.y, room.w, room.h))
+			continue; // drawn from its own tiles
 		LevelArt& art = levelArt(room.level);
 		const int wall_level = wallArtLevel(room.level);
 		const LevelArt* wall = wall_level >= 0 ? &g_level_art[wall_level] : nullptr;
@@ -1309,7 +1320,11 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		}
 	}
 
-	if ((hdr->roomEpoch != m_room_epoch || meta->levelNo != m_level_no || art_arrived) && readRooms(&epoch)) {
+	// Rooms drawn from the game's own tiles are left out of the world built from the collision map.
+	TileWorld& tiles = TileWorld::Instance();
+	tiles.sync();
+	if ((hdr->roomEpoch != m_room_epoch || meta->levelNo != m_level_no || art_arrived || tiles.coverage() != m_tile_coverage) && readRooms(&epoch)) {
+		m_tile_coverage = tiles.coverage();
 		rebuildWorld();
 		m_room_epoch = epoch;
 		m_level_no = meta->levelNo;
@@ -1669,6 +1684,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		}
 		glUniform1f(m_u_textured, 0.0f);
 	}
+	tiles.draw(m_u_textured, m_u_texture, ART_TEXTURE_UNIT, yaw);
 	if (!unit_verts.empty()) {
 		glBindVertexArray(m_vao_units);
 		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
