@@ -31,6 +31,7 @@ namespace {
 // character that walks through it.
 const float PX = 0.047f;
 const int TILE = 5;         // subtiles along a tile's edge
+const float CEILING = 7.0f; // where an indoor level's ceiling lies: the height of the walls built from the collision map
 const int TILE_W = 160, TILE_H = 80; // a floor tile's diamond, pixels
 
 // Where things are in the game's memory (1.13c).
@@ -229,6 +230,8 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 	const uint32_t o = tile.dwOrientation;
 	if (o == 0)
 		art.kind = 0;
+	else if (o == 15)
+		art.kind = 4;
 	else if (o == 2 || o == 3 || o == 6 || o == 9)
 		art.kind = 1;
 	else if (o == 1 || o == 4 || o == 5 || o == 8)
@@ -236,7 +239,7 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 	else if (o == 7 || o == 12 || o == 14)
 		art.kind = 3;
 	else
-		return art; // shadows, markers, roofs, the walls of pits: not drawn
+		return art; // shadows, markers, the walls of pits: not drawn
 
 	char name[160] = { 0 };
 	for (int i = 0; i < 159; i++) {
@@ -257,7 +260,7 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 	};
 
 	int w = 0, h = 0;
-	if (art.kind == 0) {
+	if (art.kind == 0 || art.kind == 4) {
 		// The diamond, with each row stretched to the picture's edges so that neighbouring tiles
 		// meet without a seam. Only where the tile fills its diamond: an overlay keeps its shape.
 		w = TILE_W;
@@ -269,7 +272,8 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 				out[(size_t)y * w + x] = at(x, y);
 				filled += out[(size_t)y * w + x] ? 1 : 0;
 			}
-		if (filled > TILE_W * TILE_H / 2 * 9 / 10) {
+		art.roof = tile.wRoofIndex;
+		if (art.kind == 0 && filled > TILE_W * TILE_H / 2 * 9 / 10) {
 			for (int y = 0; y < h; y++) {
 				uint32_t* row = &out[(size_t)y * w];
 				int first = -1, last = -1;
@@ -370,7 +374,7 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 		const int sy = glm::clamp(y, 0, h - 1);
 		for (int x = -1; x <= w; x++) {
 			const bool inside = x >= 0 && x < w && y >= 0 && y < h;
-			row[x + 1] = inside || art.kind == 0 ? out[(size_t)sy * w + glm::clamp(x, 0, w - 1)] : 0;
+			row[x + 1] = inside || art.kind == 0 || art.kind == 4 ? out[(size_t)sy * w + glm::clamp(x, 0, w - 1)] : 0;
 		}
 	}
 	art.page = page;
@@ -423,7 +427,7 @@ void TileWorld::setPalette(const uint32_t* rgba)
 	m_palette_set = true;
 }
 
-void TileWorld::capture(bool active)
+void TileWorld::capture(bool active, bool inside)
 {
 	if (!active || helpers::getVersion() != Version::V_113c) {
 		clearScene();
@@ -506,10 +510,12 @@ void TileWorld::capture(bool active)
 		signature = mix(signature, info.tiles.floors);
 		signature = mix(signature, info.tiles.floor_count);
 	}
+	signature = mix(signature, inside ? 1u : 0u);
 	if (!signature)
 		signature = 1;
 	if (signature == m_signature)
 		return;
+	m_inside = inside;
 
 	// ---- rebuild ----
 	std::lock_guard<std::mutex> lock(m_lock);
@@ -531,9 +537,9 @@ void TileWorld::capture(bool active)
 
 	for (const auto& info : rooms) {
 		int floors = 0;
-		const uint32_t lists[2][2] = { { info.tiles.floors, info.tiles.floor_count }, { info.tiles.walls, info.tiles.wall_count } };
+		const uint32_t lists[3][2] = { { info.tiles.floors, info.tiles.floor_count }, { info.tiles.walls, info.tiles.wall_count }, { info.tiles.roofs, info.tiles.roof_count } };
 		for (const auto& list : lists) {
-			if (!list[1])
+			if (!list[1] || list[1] > 8192)
 				continue;
 			entries.resize(list[1]);
 			if (!safeCopy(entries.data(), list[0], (size_t)list[1] * sizeof(TileEntry)))
@@ -575,6 +581,18 @@ void TileWorld::capture(bool active)
 						{ (u0 + 80.0f) / page_size, (v0 + 79.25f) / page_size }, { (u0 + 0.75f) / page_size, (v0 + 40.0f) / page_size } };
 					pushQuad(m_flat[art.page], p, uv, 200);
 					floors++;
+					if (m_inside && layer == 0) {
+						// the ceiling: the same rock overhead, in the dark
+						const glm::vec3 top[4] = { { x0, CEILING, z0 }, { x0 + TILE, CEILING, z0 }, { x0 + TILE, CEILING, z0 + TILE }, { x0, CEILING, z0 + TILE } };
+						pushQuad(m_flat[art.page], top, uv, 95);
+					}
+				} else if (art.kind == 4) {
+					// a roof, flat at its own height
+					const float y = (float)glm::max(art.roof, 40) * PX;
+					const glm::vec3 p[4] = { { x0, y, z0 }, { x0 + TILE, y, z0 }, { x0 + TILE, y, z0 + TILE }, { x0, y, z0 + TILE } };
+					const glm::vec2 uv[4] = { { (u0 + 80.0f) / page_size, (v0 + 0.75f) / page_size }, { (u0 + 159.25f) / page_size, (v0 + 40.0f) / page_size },
+						{ (u0 + 80.0f) / page_size, (v0 + 79.25f) / page_size }, { (u0 + 0.75f) / page_size, (v0 + 40.0f) / page_size } };
+					pushQuad(m_flat[art.page], p, uv, 185);
 				} else if (art.kind == 1 || art.kind == 2) {
 					const float height = vh * PX;
 					const float a = (float)(art.left - 80) / 16.0f, b = (float)(art.left + art.w - 80) / 16.0f; // along the edge, from the tile's top corner

@@ -30,6 +30,9 @@ namespace d2gl::modules {
 // tile files, and lays the floors flat and stands the walls up. The render thread draws the
 // result. Rooms this cannot be done for are left to the caller, which draws them from the
 // collision map instead.
+//
+// A building's roof is laid flat at its own height. An indoor level gets a ceiling: the floor's
+// own picture again, dark, at the height the walls end.
 class TileWorld {
 public:
 	struct Vertex {
@@ -49,6 +52,7 @@ private:
 	struct Art {
 		bool valid = false;
 		int kind = 0;       // 0 floor, 1 wall across x (stands on a line of constant y), 2 wall across y, 3 upright, 4 roof
+		int roof = 0;       // roof: how high it lies, pixels
 		int page = 0;
 		int x = 0, y = 0, w = 0, h = 0; // rectangle in the page
 		int left = 0;       // the picture's first column, in tile pixels (0..159); upright: from the tile's middle
@@ -84,6 +88,7 @@ private:
 	bool m_palette_set = false;
 	uint32_t m_palette_hash = 0;
 	uint32_t m_signature = 0;
+	bool m_inside = false; // the level has a roof over it: floors get a ceiling
 	DWORD m_next_try = 0;
 	bool m_atlas_full = false; // a picture did not fit: start the atlas over with what is needed now
 	DWORD m_atlas_reset_at = 0;
@@ -124,7 +129,8 @@ public:
 
 	// ---- game thread ----
 	void setPalette(const uint32_t* argb);
-	void capture(bool active);
+	// `inside`: the player's level is an indoor one.
+	void capture(bool active, bool inside);
 
 	// ---- render thread ----
 	// Takes over what the game thread has built since the last call. Call once a frame, first.

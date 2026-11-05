@@ -51,7 +51,8 @@ struct FrameMeta {
 	uint32_t town, online, levelNameOff;
 	uint16_t levelNameLen, unitCount;
 	uint32_t stringUsed, status;
-	uint8_t reserved[20];
+	uint8_t inside; // an indoor level: a cave, a crypt, a sewer
+	uint8_t reserved[19];
 };
 struct PlayerRecord {
 	uint32_t id, classId;
@@ -814,7 +815,7 @@ void FirstPerson::capturePositions()
 		m_pred_units_scratch.clear();
 
 	// the map tiles of the rooms around the player (F7 switches them off, for comparing)
-	TileWorld::Instance().capture(m_frame_active && m_real_tiles);
+	TileWorld::Instance().capture(m_frame_active && m_real_tiles, m_inside_level);
 
 	std::lock_guard<std::mutex> lock(m_pred_lock);
 	m_pred_player_valid = valid;
@@ -1148,6 +1149,12 @@ void FirstPerson::rebuildWorld()
 			return classAt(room.x + x, room.y + y);
 		};
 
+		// an indoor level has a roof over it: one dark sheet over a room that is not drawn from its tiles
+		if (!tiled && m_inside_level) {
+			const float x0 = (float)room.x, x1 = (float)(room.x + room.w), z0 = (float)room.y, z1 = (float)(room.y + room.h);
+			pushQuad(plain, { x0, WALL_HEIGHT, z0 }, { x1, WALL_HEIGHT, z0 }, { x1, WALL_HEIGHT, z1 }, { x0, WALL_HEIGHT, z1 }, wall_color, 0.45f);
+		}
+
 		// ---- floors and low blocks: runs along x, cut at tile borders so each piece lies in one tile ----
 		for (int y = 0; y < room.h && !tiled; y++) {
 			int x = 0;
@@ -1329,6 +1336,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 
 	// Rooms drawn from the game's own tiles are left out of the world built from the collision map.
 	TileWorld& tiles = TileWorld::Instance();
+	m_inside_level = meta->inside != 0;
 	tiles.sync();
 	if ((hdr->roomEpoch != m_room_epoch || meta->levelNo != m_level_no || art_arrived || tiles.coverage() != m_tile_coverage) && readRooms(&epoch)) {
 		m_tile_coverage = tiles.coverage();

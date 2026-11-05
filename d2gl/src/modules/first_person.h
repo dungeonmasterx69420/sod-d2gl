@@ -93,6 +93,7 @@ class FirstPerson {
 	bool m_key_f7 = false;
 	volatile bool m_real_tiles = true; // draw the rooms around the player from the game's own map tiles
 	uint32_t m_tile_coverage = 0;      // render thread: the tile world's coverage the collision world was built against
+	volatile bool m_inside_level = false; // the player's level is an indoor one (render thread writes, game thread reads)
 	bool m_trace_armed = false, m_tracing = false;
 	std::vector<TraceRecord> m_trace;
 
