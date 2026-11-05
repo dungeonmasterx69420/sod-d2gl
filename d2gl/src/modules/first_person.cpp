@@ -18,6 +18,7 @@
 
 #include "pch.h"
 #include "first_person.h"
+#include "first_person_sprites.h"
 #include "d2/common.h"
 #include "d2/funcs.h"
 #include "option/menu.h"
@@ -63,7 +64,15 @@ struct UnitRecord {
 	uint32_t id, txt;
 	uint16_t mode, rawFlags;
 	uint32_t px, py;
-	uint8_t rest[40];
+	uint32_t gfxFrame, frameCount; // animation frame and frame count, x 256
+	uint32_t hp, hpMax;
+	uint16_t nameIndex;
+	uint8_t itemQuality, pad1;
+	uint32_t nameOff;
+	uint16_t nameLen, itemCodeLen;
+	uint32_t itemCodeOff;
+	int32_t owner;
+	uint32_t reserved;
 };
 struct RoomSectionHeader {
 	uint32_t roomCount, arenaUsed;
@@ -329,6 +338,86 @@ int wallArtLevel(int level_no)
 	return -1;
 }
 
+// ---- unit sprites ----
+const float SPRITE_SCALE = 0.047f; // subtiles per sheet pixel (the art's own scale)
+const char* MONSTER_MODES[16] = { "DT", "NU", "WL", "GH", "A1", "A2", "BL", "SC", "S1", "S2", "S3", "S4", "DD", "KB", "SQ", "RN" };
+const char* OBJECT_MODES[8] = { "NU", "OP", "ON", "S1", "S2", "S3", "S4", "S5" };
+
+// The sheet row for a unit facing `dir64` (the game's 64 directions), seen from the camera. The art
+// was drawn for the isometric camera, so the facing is taken relative to the line of sight and
+// re-expressed for that camera.
+inline int spriteDirection(const Sprite& sprite, int dir64, float ux, float uz, float cam_x, float cam_z)
+{
+	if (sprite.directions <= 1 || dir64 < 0)
+		return 0;
+	const float step = glm::two_pi<float>() / 64.0f;
+	const float facing = ((float)dir64 + 0.5f) * step + glm::quarter_pi<float>();
+	const float sight = atan2f(uz - cam_z, ux - cam_x);
+	const float relative = facing - sight + sprite.iso_yaw;
+	int d = (int)roundf((relative - glm::quarter_pi<float>()) / step - 0.5f) % 64;
+	if (d < 0)
+		d += 64;
+	return sprite.dir64[d];
+}
+
+// The sheet frame from the unit's own animation clock, or from the time when it has none.
+inline int spriteFrame(const Sprite& sprite, uint32_t gfx_frame, uint32_t frame_count, bool loop, double time)
+{
+	const int count = sprite.frames;
+	if (count <= 1)
+		return 0;
+
+	const float frame = frame_count >= 256 ? (float)gfx_frame / 256.0f : (float)gfx_frame;
+	const int frames = frame_count >= 256 ? (int)(frame_count / 256) : (int)frame_count;
+	int f;
+	if (frames > 0)
+		f = frames == count ? (int)frame : (int)(frame / (float)frames * (float)count);
+	else if (loop)
+		f = (int)(time * sprite.fps);
+	else
+		return count - 1;
+	return loop ? ((f % count) + count) % count : glm::clamp(f, 0, count - 1);
+}
+
+// An upright picture standing on the ground at (ux, uz), turned to face the camera.
+inline void pushBillboard(std::vector<FpVertex>& out, const SpriteCell& cell, float ux, float uz, float base, float cam_x, float cam_z, float shade)
+{
+	if (!cell.valid)
+		return;
+	glm::vec2 sight = { ux - cam_x, uz - cam_z };
+	const float len = glm::length(sight);
+	if (len < 0.05f)
+		return;
+	sight /= len;
+	const glm::vec3 right = { -sight.y, 0.0f, sight.x }, up = { 0.0f, 1.0f, 0.0f };
+	const glm::vec3 centre = glm::vec3(ux, base, uz) + right * (cell.cx * SPRITE_SCALE) + up * (cell.cy * SPRITE_SCALE);
+	const glm::vec3 half_w = right * (cell.w * SPRITE_SCALE * 0.5f), half_h = up * (cell.h * SPRITE_SCALE * 0.5f);
+	const glm::vec3 p[4] = { centre - half_w - half_h, centre + half_w - half_h, centre + half_w + half_h, centre - half_w + half_h };
+	const glm::vec2 uv[4] = { { cell.u0, cell.v1 }, { cell.u1, cell.v1 }, { cell.u1, cell.v0 }, { cell.u0, cell.v0 } };
+	const float shades[4] = { shade, shade, shade, shade };
+	pushQuadUV(out, p, uv, shades);
+}
+
+// A picture lying on the ground (dropped items): its top points away from the camera. The art was
+// drawn for the isometric view, where depth is squashed to half, so it is stretched back out.
+inline void pushGroundSprite(std::vector<FpVertex>& out, const SpriteCell& cell, float ux, float uz, float cam_x, float cam_z, float shade)
+{
+	if (!cell.valid)
+		return;
+	glm::vec2 sight = { ux - cam_x, uz - cam_z };
+	const float len = glm::length(sight);
+	if (len < 0.05f)
+		return;
+	sight /= len;
+	const glm::vec3 right = { -sight.y, 0.0f, sight.x }, away = { sight.x, 0.0f, sight.y };
+	const glm::vec3 centre = glm::vec3(ux, 0.06f, uz) + right * (cell.cx * SPRITE_SCALE) + away * (cell.cy * SPRITE_SCALE * 2.0f);
+	const glm::vec3 half_w = right * (cell.w * SPRITE_SCALE * 0.5f), half_h = away * (cell.h * SPRITE_SCALE);
+	const glm::vec3 p[4] = { centre - half_w - half_h, centre + half_w - half_h, centre + half_w + half_h, centre - half_w + half_h };
+	const glm::vec2 uv[4] = { { cell.u0, cell.v1 }, { cell.u1, cell.v1 }, { cell.u1, cell.v0 }, { cell.u0, cell.v0 } };
+	const float shades[4] = { shade, shade, shade, shade };
+	pushQuadUV(out, p, uv, shades);
+}
+
 // An axis-aligned box from (x0, 0, z0) to (x1, h, z1): top and four sides.
 inline void pushBox(std::vector<FpVertex>& out, float x0, float z0, float x1, float z1, float y0, float h, glm::vec3 color)
 {
@@ -360,6 +449,7 @@ in vec3 v_World;
 in vec2 v_TexCoord;
 uniform vec3 u_Eye;
 uniform float u_Textured; // 1 = sample the level art
+uniform float u_Additive; // 1 = drawn with additive blending (glowing missiles)
 uniform sampler2D u_Texture;
 uniform vec4 u_Fog; // rgb = colour, a = far distance
 uniform float u_Flat; // 1 = plain colour (overlay)
@@ -384,7 +474,7 @@ void main() {
 	}
 	float dist = length(v_World - u_Eye);
 	float fog = clamp(dist / u_Fog.a, 0.0, 1.0);
-	color = mix(color, u_Fog.rgb, fog * fog);
+	color = u_Additive > 0.5 ? color * (1.0 - fog * fog) : mix(color, u_Fog.rgb, fog * fog);
 	FragColor = vec4(color, 1.0);
 })";
 
@@ -781,7 +871,8 @@ bool FirstPerson::onMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 bool FirstPerson::readFrame()
 {
 	const auto hdr = (const StateHeader*)m_base;
-	const uint32_t size = sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
+	const uint32_t records = sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
+	const uint32_t size = glm::max(records, glm::min(hdr->frameBufferSize, records + 1024u * 1024u)); // records + strings
 	if (m_frame_copy.size() != size)
 		m_frame_copy.resize(size);
 
@@ -853,6 +944,7 @@ bool FirstPerson::initGL()
 	m_u_fog = glGetUniformLocation(m_program, "u_Fog");
 	m_u_flat = glGetUniformLocation(m_program, "u_Flat");
 	m_u_textured = glGetUniformLocation(m_program, "u_Textured");
+	m_u_additive = glGetUniformLocation(m_program, "u_Additive");
 	m_u_texture = glGetUniformLocation(m_program, "u_Texture");
 
 	GLint prev_vao = 0, prev_vbo = 0;
@@ -1248,6 +1340,19 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	} else
 		InterlockedExchange(&m_target_valid, 0);
 
+	// Units are drawn with the game's own sprites when the sprite service has supplied them, as
+	// plain boxes otherwise (service not running, or a graphic the game does not have).
+	SpriteStore& store = SpriteStore::Instance();
+	store.pump();
+	static std::unordered_map<GLuint, std::vector<FpVertex>> sprite_verts, glow_verts; // by sheet
+	for (auto& item : sprite_verts)
+		item.second.clear();
+	for (auto& item : glow_verts)
+		item.second.clear();
+	const int act = glm::clamp(meta->act + 1, 1, 5);
+	const char* strings = (const char*)m_frame_copy.data() + sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
+	const size_t strings_size = m_frame_copy.size() - (sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord));
+
 	for (uint32_t i = 0; i < unit_count; i++) {
 		const UnitRecord& u = units[i];
 		const glm::vec2 upos = unitPos(u);
@@ -1255,13 +1360,101 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		if (fabsf(ux - px) > 120.0f || fabsf(uz - pz) > 120.0f)
 			continue;
 
+		const bool targeted = (int)i == target && looking;
+		const float shade = targeted ? 1.25f : 1.0f;
+		const bool dead = u.type == 1 && (u.mode == 0 || u.mode == 12);
+
+		// ---- sprite ----
+		const Sprite* sprite = nullptr;
+		SpriteState state = SpriteState::Failed;
+		bool drawn = false;
+		switch (u.type) {
+			case 1: {
+				const std::string* token = store.monsterToken(u.txt);
+				if (!token || u.mode >= 16)
+					break;
+				const char* mode = MONSTER_MODES[u.mode];
+				state = store.get("monster", *token, mode, act, &sprite);
+				if (state != SpriteState::Ready)
+					break;
+				int frame;
+				if (u.mode == 12 && sprite->mode == "DT")
+					frame = sprite->frames - 1; // a corpse drawn from the death animation: its last frame
+				else if (sprite->mode != mode)
+					frame = spriteFrame(*sprite, 0, 0, true, now); // a substitute animation runs on its own clock
+				else
+					frame = spriteFrame(*sprite, u.gfxFrame, u.frameCount, u.mode != 0, now);
+				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, shade);
+				drawn = true;
+			} break;
+			case 2: {
+				const ObjectInfo* info = store.object(u.txt);
+				if (!info)
+					break;
+				if (!info->draw)
+					continue; // an invisible helper object
+				const int mode_index = u.mode < 8 ? u.mode : 0;
+				state = store.get("object", info->token, OBJECT_MODES[mode_index], act, &sprite);
+				if (state != SpriteState::Ready)
+					break;
+				int frame;
+				if (u.frameCount > 256 || (u.frameCount > 1 && u.frameCount < 256))
+					frame = spriteFrame(*sprite, u.gfxFrame, u.frameCount, info->cycle[mode_index], now);
+				else {
+					// objects.txt says how many frames a mode uses (a closed chest is 1 frame of a 2-frame sheet)
+					const int count = info->frames[mode_index] > 0 ? glm::min(sprite->frames, info->frames[mode_index]) : sprite->frames;
+					const float fps = info->delta[mode_index] ? 25.0f * (float)info->delta[mode_index] / 256.0f : sprite->fps;
+					if (count <= 1)
+						frame = 0;
+					else if (info->cycle[mode_index])
+						frame = (int)(now * fps) % count;
+					else
+						frame = mode_index == 0 ? 0 : count - 1; // a one-shot animation with no clock: show where it ends
+				}
+				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, shade);
+				drawn = true;
+			} break;
+			case 3: {
+				const MissileInfo* info = store.missile(u.txt);
+				if (!info || info->cel.empty())
+					break;
+				state = store.get("missile", info->cel, "NU", act, &sprite);
+				if (state != SpriteState::Ready)
+					break;
+				int frame;
+				if (u.frameCount > 1)
+					frame = spriteFrame(*sprite, u.gfxFrame, u.frameCount, true, now);
+				else
+					frame = sprite->frames > 1 ? (int)(now * 25.0 * (double)info->anim_rate / 1024.0) % sprite->frames : 0;
+				auto& batch = info->additive ? glow_verts[sprite->texture] : sprite_verts[sprite->texture];
+				pushBillboard(batch, sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, 1.0f);
+				drawn = true;
+			} break;
+			case 4: {
+				if (!u.itemCodeLen || (size_t)u.itemCodeOff + u.itemCodeLen > strings_size)
+					break;
+				std::string code(strings + u.itemCodeOff, u.itemCodeLen);
+				while (!code.empty() && (code.back() == ' ' || code.back() == 0))
+					code.pop_back();
+				const std::string* flippy = store.itemFlippy(code);
+				if (!flippy)
+					break;
+				state = store.get("item", *flippy, "NU", act, &sprite);
+				if (state != SpriteState::Ready)
+					break;
+				pushGroundSprite(sprite_verts[sprite->texture], sprite->cell(0, sprite->frames - 1), ux, uz, px, pz, shade);
+				drawn = true;
+			} break;
+		}
+		if (drawn || state == SpriteState::Loading || dead)
+			continue; // drawn, about to be, or a corpse with no art (no box for those)
+
+		// ---- box ----
 		float half = 0.5f, height = 1.0f, base = 0.0f;
 		glm::vec3 color = { 1.0f, 1.0f, 1.0f };
 		switch (u.type) {
 			case 0: half = 0.7f, height = 3.4f, color = { 0.25f, 0.55f, 0.95f }; break; // other players
 			case 1:
-				if (u.mode == 0 || u.mode == 12) // dying / dead
-					continue;
 				half = 0.8f, height = 3.4f;
 				color = (u.rawFlags & 0x0010) ? glm::vec3(0.30f, 0.75f, 0.45f) : glm::vec3(0.80f, 0.16f, 0.12f); // npc : monster
 				if (u.rawFlags & 0x004A) // unique / superunique / boss
@@ -1273,7 +1466,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			case 5: half = 1.0f, height = 5.0f, color = { 0.45f, 0.25f, 0.75f }; break; // exits
 			default: continue;
 		}
-		if ((int)i == target && looking)
+		if (targeted)
 			color = glm::min(color * 1.25f + glm::vec3(0.18f), glm::vec3(1.0f));
 		pushBox(unit_verts, ux - half, uz - half, ux + half, uz + half, base, base + height, color);
 	}
@@ -1295,6 +1488,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	glUniform3f(m_u_eye, eye.x, eye.y, eye.z);
 	glUniform4f(m_u_fog, fog.r, fog.g, fog.b, FOG_FAR);
 	glUniform1f(m_u_flat, 0.0f);
+	glUniform1f(m_u_additive, 0.0f);
 
 	if (m_world_vertex_count) {
 		glBindVertexArray(m_vao_world);
@@ -1313,6 +1507,41 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
 		glBufferData(GL_ARRAY_BUFFER, unit_verts.size() * sizeof(FpVertex), unit_verts.data(), GL_STREAM_DRAW);
 		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)unit_verts.size());
+	}
+
+	// sprites: one draw per sheet, then the glowing ones added on top
+	{
+		glBindVertexArray(m_vao_units);
+		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
+		glActiveTexture(GL_TEXTURE0 + ART_TEXTURE_UNIT);
+		glUniform1i(m_u_texture, ART_TEXTURE_UNIT);
+		glUniform1f(m_u_textured, 1.0f);
+		const auto drawSheets = [](std::unordered_map<GLuint, std::vector<FpVertex>>& sheets) {
+			for (auto& item : sheets) {
+				if (item.second.empty())
+					continue;
+				glBindTexture(GL_TEXTURE_2D, item.first);
+				glBufferData(GL_ARRAY_BUFFER, item.second.size() * sizeof(FpVertex), item.second.data(), GL_STREAM_DRAW);
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei)item.second.size());
+			}
+		};
+		drawSheets(sprite_verts);
+
+		GLint blend_src_rgb = GL_ONE, blend_dst_rgb = GL_ZERO, blend_src_alpha = GL_ONE, blend_dst_alpha = GL_ZERO;
+		glGetIntegerv(GL_BLEND_SRC_RGB, &blend_src_rgb);
+		glGetIntegerv(GL_BLEND_DST_RGB, &blend_dst_rgb);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &blend_src_alpha);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &blend_dst_alpha);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_ONE, GL_ONE);
+		glDepthMask(GL_FALSE);
+		glUniform1f(m_u_additive, 1.0f);
+		drawSheets(glow_verts);
+		glUniform1f(m_u_additive, 0.0f);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+		glBlendFuncSeparate(blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha); // the wrapper caches its blend state
+		glUniform1f(m_u_textured, 0.0f);
 	}
 
 	if (looking) {

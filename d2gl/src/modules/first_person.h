@@ -50,7 +50,7 @@ class FirstPerson {
 		uint32_t first, count;
 	};
 	std::vector<Batch> m_batches;
-	GLint m_u_textured = -1, m_u_texture = -1;
+	GLint m_u_textured = -1, m_u_texture = -1, m_u_additive = -1;
 	DWORD m_art_retry_time = 0;
 	uint32_t m_room_epoch = 0xFFFFFFFF;
 	int32_t m_level_no = -2;
