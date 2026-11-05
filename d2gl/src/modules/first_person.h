@@ -52,6 +52,8 @@ class FirstPerson {
 	std::vector<Batch> m_batches;
 	GLint m_u_textured = -1, m_u_texture = -1, m_u_additive = -1;
 	DWORD m_art_retry_time = 0;
+	float m_arms_yaw = 0.0f, m_arms_pitch = 0.0f;
+	bool m_arms_look_valid = false;
 	uint32_t m_room_epoch = 0xFFFFFFFF;
 	int32_t m_level_no = -2;
 	// ---- camera and input (written on the game thread, read on the render thread) ----

@@ -19,6 +19,7 @@
 #include "pch.h"
 #include "first_person.h"
 #include "first_person_sprites.h"
+#include "first_person_viewmodel.h"
 #include "d2/common.h"
 #include "d2/funcs.h"
 #include "option/menu.h"
@@ -56,7 +57,14 @@ struct PlayerRecord {
 	uint32_t px, py;
 	int16_t dir64;
 	uint16_t mode;
-	uint8_t rest[72];
+	uint32_t gfxFrame, frameCount; // animation frame and frame count, x 256
+	uint32_t hpRaw, hpMaxRaw, mpRaw, mpMaxRaw, stamRaw, stamMaxRaw;
+	int32_t leftSkill, rightSkill;
+	uint32_t nameOff;
+	uint16_t nameLen, pad0;
+	uint32_t wclassOff;
+	uint16_t wclassLen, pad1;
+	uint32_t reserved[4];
 };
 struct UnitRecord {
 	uint8_t type, pad0;
@@ -1542,6 +1550,34 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		glDisable(GL_BLEND);
 		glBlendFuncSeparate(blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha); // the wrapper caches its blend state
 		glUniform1f(m_u_textured, 0.0f);
+	}
+
+	// ---- the player's own arms and weapon, over everything in the world ----
+	{
+		ViewModel::State arms;
+		if (player->wclassLen && (size_t)player->wclassOff + player->wclassLen <= strings_size)
+			arms.weapon_class.assign(strings + player->wclassOff, player->wclassLen);
+		arms.mode = player->mode;
+		const float frame = player->frameCount >= 256 ? (float)player->gfxFrame / 256.0f : (float)player->gfxFrame;
+		const float frames = player->frameCount >= 256 ? (float)(player->frameCount / 256) : (float)player->frameCount;
+		arms.progress = frames > 0.0f ? glm::clamp(frame / frames, 0.0f, 1.0f) : 0.0f;
+		float turned = yaw - m_arms_yaw;
+		if (turned > glm::pi<float>())
+			turned -= glm::two_pi<float>();
+		if (turned < -glm::pi<float>())
+			turned += glm::two_pi<float>();
+		arms.look_yaw = m_arms_look_valid ? turned : 0.0f;
+		arms.look_pitch = m_arms_look_valid ? pitch - m_arms_pitch : 0.0f;
+		m_arms_yaw = yaw;
+		m_arms_pitch = pitch;
+		m_arms_look_valid = true;
+		arms.brightness = meta->town ? 1.0f : 0.85f;
+		ViewModel::Instance().render(arms, game_size);
+
+		// back to the world's program and buffers for the overlay below
+		glUseProgram(m_program);
+		glBindVertexArray(m_vao_units);
+		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
 	}
 
 	if (looking) {
