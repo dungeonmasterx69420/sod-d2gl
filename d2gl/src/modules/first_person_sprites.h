@@ -108,6 +108,7 @@ class SpriteStore {
 	std::unordered_map<uint32_t, ObjectInfo> m_objects;
 	std::unordered_map<uint32_t, MissileInfo> m_missiles;
 	std::unordered_map<std::string, std::string> m_item_flippies;
+	std::unordered_map<std::string, std::string> m_item_names, m_item_types;
 
 	SpriteStore() = default;
 	~SpriteStore();
@@ -134,6 +135,9 @@ public:
 	const ObjectInfo* object(uint32_t txt) const;
 	const MissileInfo* missile(uint32_t txt) const;
 	const std::string* itemFlippy(const std::string& code) const;
+	// An item's plain name ("Short Sword") and its type ("rune", "gold", ...) by item code.
+	const std::string* itemName(const std::string& code) const;
+	const std::string* itemType(const std::string& code) const;
 };
 
 }

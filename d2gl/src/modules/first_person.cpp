@@ -19,6 +19,7 @@
 #include "pch.h"
 #include "first_person.h"
 #include "first_person_sprites.h"
+#include "first_person_text.h"
 #include "first_person_tiles.h"
 #include "first_person_viewmodel.h"
 #include "d2/common.h"
@@ -509,11 +510,15 @@ uniform float u_Textured; // 1 = sample the level art
 uniform float u_Additive; // 1 = drawn with additive blending (glowing missiles)
 uniform sampler2D u_Texture;
 uniform vec4 u_Fog; // rgb = colour, a = far distance
-uniform float u_Flat; // 1 = plain colour (overlay)
+uniform float u_Flat; // 1 = plain colour (overlay), 2 = text: the colour, with the texture's alpha
 layout(location = 0) out vec4 FragColor;
 void main() {
+	if (u_Flat > 1.5) {
+		FragColor = vec4(v_Color.rgb, v_Color.a * texture(u_Texture, v_TexCoord).a);
+		return;
+	}
 	if (u_Flat > 0.5) {
-		FragColor = vec4(v_Color.rgb, 1.0);
+		FragColor = vec4(v_Color.rgb, v_Color.a);
 		return;
 	}
 	vec3 color = v_Color.rgb;
@@ -823,6 +828,37 @@ void FirstPerson::capturePositions()
 	m_pred_units.swap(m_pred_units_scratch);
 }
 
+void FirstPerson::notice(const char* text)
+{
+	strncpy_s(m_notice, text, _TRUNCATE);
+	m_notice_tick = GetTickCount();
+}
+
+// sod-view.ini, in the game's folder: one "fov=<degrees>" line.
+void FirstPerson::loadView()
+{
+	m_view_loaded = true;
+	FILE* file = nullptr;
+	if (fopen_s(&file, "sod-view.ini", "r") != 0 || !file)
+		return;
+	char line[64];
+	while (fgets(line, sizeof(line), file)) {
+		float value = 0.0f;
+		if (sscanf_s(line, "fov=%f", &value) == 1 && value >= 50.0f && value <= 100.0f)
+			m_fov = value;
+	}
+	fclose(file);
+}
+
+void FirstPerson::saveView()
+{
+	FILE* file = nullptr;
+	if (fopen_s(&file, "sod-view.ini", "w") != 0 || !file)
+		return;
+	fprintf(file, "fov=%d\n", (int)m_fov);
+	fclose(file);
+}
+
 void FirstPerson::update(bool active)
 {
 	m_frame_active = active;
@@ -834,11 +870,29 @@ void FirstPerson::update(bool active)
 		toggle();
 	if (f10 && !m_key_f10)
 		m_look_free = !m_look_free;
-	const bool f7 = foreground && keyDown(VK_F7);
-	if (f7 && !m_key_f7)
+	// The rest take Ctrl: F1 to F8 on their own are the game's skill keys.
+	//   Ctrl+F5 / Ctrl+F6: narrower / wider field of view.
+	//   Ctrl+F7: the game's own map tiles off / on.  Ctrl+F8: write a trace of the next frame.
+	if (!m_view_loaded)
+		loadView();
+	const bool ctrl = foreground && keyDown(VK_CONTROL);
+	const bool f5 = ctrl && keyDown(VK_F5), f6 = ctrl && keyDown(VK_F6);
+	if ((f5 && !m_key_f5) || (f6 && !m_key_f6)) {
+		m_fov = glm::clamp(m_fov + (f6 ? 5.0f : -5.0f), 50.0f, 100.0f);
+		saveView();
+		char line[48];
+		sprintf_s(line, "FIELD OF VIEW %d", (int)m_fov);
+		notice(line);
+	}
+	m_key_f5 = f5;
+	m_key_f6 = f6;
+	const bool f7 = ctrl && keyDown(VK_F7);
+	if (f7 && !m_key_f7) {
 		m_real_tiles = !m_real_tiles;
+		notice(m_real_tiles ? "MAP TILES ON" : "MAP TILES OFF");
+	}
 	m_key_f7 = f7;
-	const bool f8 = foreground && keyDown(VK_F8);
+	const bool f8 = ctrl && keyDown(VK_F8);
 	if (f8 && !m_key_f8)
 		m_trace_armed = true; // trace the next frame
 	m_key_f8 = f8;
@@ -1493,7 +1547,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	const bool looking = m_look;
 	const glm::vec3 eye = { px, EYE_HEIGHT, pz };
 	const glm::vec3 dir = { cosf(yaw) * cosf(pitch), sinf(pitch), sinf(yaw) * cosf(pitch) };
-	const glm::mat4 proj = glm::perspective(glm::radians(70.0f), (float)game_size.x / (float)game_size.y, 0.15f, 400.0f);
+	const glm::mat4 proj = glm::perspective(glm::radians((float)m_fov), (float)game_size.x / (float)game_size.y, 0.15f, 400.0f);
 	const glm::mat4 view = glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
 	const glm::mat4 mvp = proj * view;
 
@@ -1574,6 +1628,16 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			m_hit_kill = kill;
 		}
 	}
+
+	// what lies on the ground gets its name written over it, always: there is no pointer to hover with
+	struct ItemLabel {
+		std::string text;
+		float x, y, away;
+		glm::vec3 color;
+		bool targeted;
+	};
+	static std::vector<ItemLabel> item_labels;
+	item_labels.clear();
 
 	// Units are drawn with the game's own sprites when the sprite service has supplied them, as
 	// plain boxes otherwise (service not running, or a graphic the game does not have).
@@ -1673,6 +1737,35 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 				std::string code(strings + u.itemCodeOff, u.itemCodeLen);
 				while (!code.empty() && (code.back() == ' ' || code.back() == 0))
 					code.pop_back();
+				// its name over it, in the colour of its quality
+				if (const std::string* name = store.itemName(code)) {
+					const glm::vec4 clip = mvp * glm::vec4(ux, 0.9f, uz, 1.0f);
+					const float away = glm::distance(glm::vec2(ux, uz), glm::vec2(px, pz));
+					if (clip.w > 0.2f && away < 34.0f && fabsf(clip.x) < clip.w * 1.1f && fabsf(clip.y) < clip.w * 1.1f) {
+						const std::string* type = store.itemType(code);
+						glm::vec3 color = { 0.92f, 0.92f, 0.92f };
+						switch (u.itemQuality) {
+							case 1: color = { 0.62f, 0.62f, 0.62f }; break;  // cracked, crude
+							case 4: color = { 0.45f, 0.50f, 1.00f }; break;  // magic
+							case 5: color = { 0.20f, 0.95f, 0.20f }; break;  // set
+							case 6: color = { 1.00f, 1.00f, 0.42f }; break;  // rare
+							case 7: color = { 0.86f, 0.76f, 0.48f }; break;  // unique
+							case 8: color = { 1.00f, 0.66f, 0.10f }; break;  // crafted
+						}
+						if (type && *type == "rune")
+							color = { 1.00f, 0.66f, 0.10f };
+						ItemLabel label;
+						label.text = *name;
+						for (char& ch : label.text)
+							ch = (char)toupper((unsigned char)ch);
+						label.x = clip.x / clip.w;
+						label.y = clip.y / clip.w;
+						label.away = away;
+						label.color = color;
+						label.targeted = targeted;
+						item_labels.push_back(label);
+					}
+				}
 				const std::string* flippy = store.itemFlippy(code);
 				if (!flippy)
 					break;
@@ -1814,6 +1907,83 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		glUseProgram(m_program);
 		glBindVertexArray(m_vao_units);
 		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
+	}
+
+	// ---- the names of what lies on the ground ----
+	FpText& font = FpText::Instance();
+	const bool show_notice = m_notice[0] && GetTickCount() - m_notice_tick < 1800;
+	if ((!item_labels.empty() || show_notice) && font.ready()) {
+		static std::vector<FpVertex> plates;
+		static std::vector<FpText::Vertex> letters;
+		plates.clear();
+		letters.clear();
+		// nearest first, so a nearer name keeps its place and a further one moves up out of its way
+		std::sort(item_labels.begin(), item_labels.end(), [](const ItemLabel& a, const ItemLabel& b) { return a.away < b.away; });
+		const float line = 2.0f * 11.0f / (float)game_size.y; // eleven game pixels high
+		const float stretch = (float)game_size.y / (float)game_size.x, pad_y = line * 0.18f, pad_x = line * stretch * 0.35f;
+		struct Box {
+			float x0, y0, x1, y1;
+		};
+		static std::vector<Box> boxes;
+		boxes.clear();
+		for (const ItemLabel& label : item_labels) {
+			const float w = font.width(label.text) * line * stretch;
+			Box box = { label.x - w * 0.5f - pad_x, label.y - pad_y, label.x + w * 0.5f + pad_x, label.y + line + pad_y };
+			for (int tries = 0; tries < 12; tries++) {
+				bool clash = false;
+				for (const Box& other : boxes)
+					clash = clash || (box.x0 < other.x1 && box.x1 > other.x0 && box.y0 < other.y1 && box.y1 > other.y0);
+				if (!clash)
+					break;
+				box.y0 += line + pad_y * 2.5f;
+				box.y1 += line + pad_y * 2.5f;
+			}
+			boxes.push_back(box);
+			const uint8_t shade = label.targeted ? 60 : 0, alpha = label.targeted ? 215 : 165;
+			const FpVertex corner[4] = { { box.x0, box.y0, 0, shade, shade, shade, alpha, 0, 0 }, { box.x1, box.y0, 0, shade, shade, shade, alpha, 0, 0 }, { box.x1, box.y1, 0, shade, shade, shade, alpha, 0, 0 },
+				{ box.x0, box.y1, 0, shade, shade, shade, alpha, 0, 0 } };
+			static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+			for (const int i : order)
+				plates.push_back(corner[i]);
+			font.push(letters, label.text, box.x0 + pad_x, box.y0 + pad_y, line, stretch, label.targeted ? glm::min(label.color * 1.2f + glm::vec3(0.1f), glm::vec3(1.0f)) : label.color);
+		}
+		if (show_notice) {
+			// a setting that was just changed, near the top of the view
+			const std::string text(m_notice);
+			const float tall = line * 1.25f, w = font.width(text) * tall * stretch, y = 0.62f;
+			const FpVertex corner[4] = { { -w * 0.5f - pad_x * 2, y - pad_y * 2, 0, 0, 0, 0, 170, 0, 0 }, { w * 0.5f + pad_x * 2, y - pad_y * 2, 0, 0, 0, 0, 170, 0, 0 },
+				{ w * 0.5f + pad_x * 2, y + tall + pad_y * 2, 0, 0, 0, 0, 170, 0, 0 }, { -w * 0.5f - pad_x * 2, y + tall + pad_y * 2, 0, 0, 0, 0, 170, 0, 0 } };
+			static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+			for (const int i : order)
+				plates.push_back(corner[i]);
+			font.push(letters, text, -w * 0.5f, y, tall, stretch, { 0.95f, 0.88f, 0.62f });
+		}
+
+		GLint blend_src_rgb = 0, blend_dst_rgb = 0, blend_src_alpha = 0, blend_dst_alpha = 0;
+		glGetIntegerv(GL_BLEND_SRC_RGB, &blend_src_rgb);
+		glGetIntegerv(GL_BLEND_DST_RGB, &blend_dst_rgb);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &blend_src_alpha);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &blend_dst_alpha);
+		const glm::mat4 identity(1.0f);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+		glUniformMatrix4fv(m_u_mvp, 1, GL_FALSE, &identity[0][0]);
+		glBindVertexArray(m_vao_units);
+		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
+		glUniform1f(m_u_flat, 1.0f);
+		glBufferData(GL_ARRAY_BUFFER, plates.size() * sizeof(FpVertex), plates.data(), GL_STREAM_DRAW);
+		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)plates.size());
+		glUniform1f(m_u_flat, 2.0f);
+		glActiveTexture(GL_TEXTURE0 + ART_TEXTURE_UNIT);
+		glUniform1i(m_u_texture, ART_TEXTURE_UNIT);
+		glBindTexture(GL_TEXTURE_2D, font.texture());
+		glBufferData(GL_ARRAY_BUFFER, letters.size() * sizeof(FpText::Vertex), letters.data(), GL_STREAM_DRAW);
+		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)letters.size());
+		glUniform1f(m_u_flat, 0.0f);
+		glDisable(GL_BLEND);
+		glBlendFuncSeparate(blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha); // the wrapper caches its blend state
+		glEnable(GL_DEPTH_TEST);
 	}
 
 	if (looking) {

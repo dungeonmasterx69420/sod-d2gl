@@ -183,6 +183,10 @@ bool SpriteStore::loadIndexes()
 			const auto& row = item.value();
 			if (row.contains("flippy") && row["flippy"].is_string())
 				m_item_flippies[item.key()] = row["flippy"].get<std::string>();
+			if (row.contains("name") && row["name"].is_string())
+				m_item_names[item.key()] = row["name"].get<std::string>();
+			if (row.contains("type") && row["type"].is_string())
+				m_item_types[item.key()] = row["type"].get<std::string>();
 		}
 	}
 	return true;
@@ -234,6 +238,8 @@ void SpriteStore::workerMain()
 		m_objects.clear();
 		m_missiles.clear();
 		m_item_flippies.clear();
+		m_item_names.clear();
+		m_item_types.clear();
 		std::unique_lock<std::mutex> lock(m_lock);
 		if (m_wake.wait_for(lock, std::chrono::seconds(2), [this] { return m_quit; }))
 			return;
@@ -376,6 +382,18 @@ const MissileInfo* SpriteStore::missile(uint32_t txt) const
 		return nullptr;
 	const auto it = m_missiles.find(txt);
 	return it == m_missiles.end() ? nullptr : &it->second;
+}
+
+const std::string* SpriteStore::itemName(const std::string& code) const
+{
+	const auto it = m_item_names.find(code);
+	return it == m_item_names.end() ? nullptr : &it->second;
+}
+
+const std::string* SpriteStore::itemType(const std::string& code) const
+{
+	const auto it = m_item_types.find(code);
+	return it == m_item_types.end() ? nullptr : &it->second;
 }
 
 const std::string* SpriteStore::itemFlippy(const std::string& code) const

@@ -90,7 +90,17 @@ class FirstPerson {
 		uint32_t vertices;
 	};
 	bool m_key_f8 = false;
-	bool m_key_f7 = false;
+	bool m_key_f7 = false, m_key_f5 = false, m_key_f6 = false;
+
+	// ---- field of view (Ctrl+F5 / Ctrl+F6), kept in sod-view.ini next to the game ----
+	volatile float m_fov = 70.0f; // vertical, degrees
+	bool m_view_loaded = false;
+	// a line shown at the top of the view for a moment (game thread writes, render thread reads)
+	char m_notice[48] = { 0 };
+	volatile DWORD m_notice_tick = 0;
+	void notice(const char* text);
+	void loadView();
+	void saveView();
 	volatile bool m_real_tiles = true; // draw the rooms around the player from the game's own map tiles
 	uint32_t m_tile_coverage = 0;      // render thread: the tile world's coverage the collision world was built against
 	volatile bool m_inside_level = false; // the player's level is an indoor one (render thread writes, game thread reads)
