@@ -22,6 +22,7 @@
 #include "first_person_viewmodel.h"
 #include "d2/common.h"
 #include "d2/funcs.h"
+#include "helpers.h"
 #include "option/menu.h"
 #include <nlohmann/json.hpp>
 #include <stb/stb_image.h>
@@ -792,7 +793,17 @@ void FirstPerson::update(bool active)
 		m_raw_registered = RegisterRawInputDevices(&device, 1, sizeof(device)) == TRUE;
 	}
 
-	const bool panel = !active || *d2::screen_shift != SCREENPANEL_NONE || *d2::esc_menu_open || Menu::instance().isVisible();
+	// Anything of the game's that needs the pointer or the keyboard gives them back: side panels,
+	// the Esc menu, an NPC's menu or shop, the waypoint list, the stash, the chat line, ...
+	bool panel = !active || *d2::screen_shift != SCREENPANEL_NONE || *d2::esc_menu_open || Menu::instance().isVisible();
+	if (!panel && isVer(V_113c)) {
+		// The game keeps one flag per panel in an array; d2gl's esc_menu_open is its entry 9
+		// (help_menu_open is entry 0x21 and skill_menu_open entry 3 of the same array).
+		const uint32_t* flags = (const uint32_t*)d2::esc_menu_open - 9;
+		static const uint8_t panels[] = { 0x01, 0x02, 0x04, 0x05, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x21 };
+		for (const uint8_t id : panels)
+			panel = panel || flags[id] != 0;
+	}
 	const bool want = m_enabled && active && foreground && !m_look_free && !panel && m_raw_registered && openCommands();
 	setLook(want);
 	if (!m_look)
@@ -1343,8 +1354,10 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	const float fx = cosf(yaw), fz = sinf(yaw);
 	for (uint32_t i = 0; i < unit_count; i++) {
 		const UnitRecord& u = units[i];
-		if (u.type == 3 || (u.type == 1 && (u.mode == 0 || u.mode == 12)))
+		if (u.type == 3 || (u.type == 1 && (u.mode == 0 || u.mode == 12)) || (u.type == 0 && u.id == player->id))
 			continue;
+		if (u.type == 2 && !(u.rawFlags & 0x0080))
+			continue; // scenery (a torch, a banner): nothing to use, and it must not shield what stands behind it
 		const glm::vec2 upos = unitPos(u);
 		const float dx = upos.x - px, dz = upos.y - pz;
 		const float along = dx * fx + dz * fz;
@@ -1382,6 +1395,10 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		const glm::vec2 upos = unitPos(u);
 		const float ux = upos.x, uz = upos.y;
 		if (fabsf(ux - px) > 120.0f || fabsf(uz - pz) > 120.0f)
+			continue;
+
+		// the player's own unit (a corpse, after dying) sits on the camera: never draw it
+		if (u.type == 0 && (u.id == player->id || (fabsf(ux - px) < 1.5f && fabsf(uz - pz) < 1.5f)))
 			continue;
 
 		const bool targeted = (int)i == target && looking;

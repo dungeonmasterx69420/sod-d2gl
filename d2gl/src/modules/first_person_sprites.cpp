@@ -87,10 +87,11 @@ bool parseLayout(const json& doc, Sprite& sprite)
 
 			SpriteCell& cell = sprite.cells[(size_t)d * sprite.frames + f];
 			cell.valid = true;
-			cell.u0 = (x + bx) / atlas_w;
-			cell.u1 = (x + bx + bw) / atlas_w;
-			cell.v0 = (y + by) / atlas_h;
-			cell.v1 = (y + by + bh) / atlas_h;
+			// half a texel in from the edges: the sheet is filtered and frames sit edge to edge
+			cell.u0 = (x + bx + 0.5f) / atlas_w;
+			cell.u1 = (x + bx + bw - 0.5f) / atlas_w;
+			cell.v0 = (y + by + 0.5f) / atlas_h;
+			cell.v1 = (y + by + bh - 0.5f) / atlas_h;
 			cell.cx = bx + bw * 0.5f - anchor_x;
 			cell.cy = anchor_y - by - bh * 0.5f;
 			cell.w = bw;
@@ -298,9 +299,9 @@ void SpriteStore::pump()
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, result.width, result.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, result.pixels);
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-		// frames sit edge to edge in the sheet, so no mipmaps and no blending across frame borders
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		// smooth when close; no mipmaps, frames sit edge to edge in the sheet (see the texel inset)
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		stbi_image_free(result.pixels);
