@@ -75,6 +75,12 @@ class FirstPerson {
 	// ---- crosshair target and player position (written on the render thread) ----
 	volatile LONG m_target_valid = 0;
 	volatile uint32_t m_target_type = 0, m_target_id = 0, m_target_flags = 0;
+
+	// ---- hit marker ----
+	volatile DWORD m_fire_tick = 0;                  // when a mouse button last sent an attack (game thread writes)
+	std::unordered_map<uint32_t, uint32_t> m_unit_life, m_unit_life_next; // living monsters' life, last frame (render thread)
+	double m_hit_time = -10.0;
+	bool m_hit_kill = false;
 	volatile float m_player_x = 0.0f, m_player_y = 0.0f;
 	std::vector<uint8_t> m_frame_copy;
 	// ---- one-frame draw trace (F8), written to sod-fp-debug.txt next to the game ----

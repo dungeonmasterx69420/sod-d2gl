@@ -740,6 +740,7 @@ void FirstPerson::setLook(bool on)
 // One click of a mouse button: the unit under the crosshair if there is one, otherwise the ground ahead.
 void FirstPerson::fire(uint32_t hand)
 {
+	m_fire_tick = GetTickCount();
 	const float yaw = m_yaw;
 	if (m_target_valid) {
 		const uint32_t type = m_target_type, id = m_target_id;
@@ -1524,6 +1525,48 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	} else
 		InterlockedExchange(&m_target_valid, 0);
 
+	// names and codes of this frame's units (weapon class, item codes)
+	const char* strings = (const char*)m_frame_copy.data() + sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
+	const size_t strings_size = m_frame_copy.size() - (sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord));
+
+	// The crosshair turns red on a monster a click would hit at once: any monster for a bow or a
+	// crossbow, one within arm's reach otherwise. Further away the character walks up to it first.
+	bool in_reach = false;
+	if (target >= 0 && units[target].type == 1 && !(units[target].rawFlags & 0x0010)) {
+		bool ranged = false;
+		if (player->wclassLen && (size_t)player->wclassOff + player->wclassLen <= strings_size) {
+			const std::string wclass(strings + player->wclassOff, player->wclassLen);
+			ranged = wclass == "bow" || wclass == "xbw";
+		}
+		in_reach = ranged || glm::distance(unitPos(units[target]), sample) < 5.5f; // blows land at about 4 on a small monster, further on a large one
+	}
+
+	// The hit marker: a monster lost life, or died, shortly after a click that attacks. In first
+	// person the character's own swing is not on screen to show that the blow landed.
+	{
+		bool hit = false, kill = false;
+		m_unit_life_next.clear();
+		for (uint32_t i = 0; i < unit_count; i++) {
+			const UnitRecord& u = units[i];
+			if (u.type != 1 || (u.rawFlags & 0x0010))
+				continue;
+			const auto before = m_unit_life.find(u.id);
+			if (u.mode == 0 || u.mode == 12) { // dying or dead: a kill if it was alive a frame ago
+				if (before != m_unit_life.end())
+					hit = kill = true;
+				continue;
+			}
+			if (before != m_unit_life.end() && u.hp < before->second)
+				hit = true;
+			m_unit_life_next[u.id] = u.hp;
+		}
+		m_unit_life.swap(m_unit_life_next);
+		if (hit && GetTickCount() - m_fire_tick < 1500) {
+			m_hit_time = now;
+			m_hit_kill = kill;
+		}
+	}
+
 	// Units are drawn with the game's own sprites when the sprite service has supplied them, as
 	// plain boxes otherwise (service not running, or a graphic the game does not have).
 	SpriteStore& store = SpriteStore::Instance();
@@ -1534,8 +1577,6 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	for (auto& item : glow_verts)
 		item.second.clear();
 	const int act = glm::clamp(meta->act + 1, 1, 5);
-	const char* strings = (const char*)m_frame_copy.data() + sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
-	const size_t strings_size = m_frame_copy.size() - (sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord));
 
 	for (uint32_t i = 0; i < unit_count; i++) {
 		const UnitRecord& u = units[i];
@@ -1772,9 +1813,25 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		static std::vector<FpVertex> cross;
 		cross.clear();
 		const float h = 0.022f, w = h * (float)game_size.y / (float)game_size.x, t = 0.14f;
-		const glm::vec3 tint = target >= 0 ? glm::vec3(1.0f, 0.82f, 0.30f) : glm::vec3(0.92f, 0.92f, 0.92f);
+		const glm::vec3 tint = in_reach ? glm::vec3(0.95f, 0.16f, 0.12f) : target >= 0 ? glm::vec3(1.0f, 0.82f, 0.30f) : glm::vec3(0.92f, 0.92f, 0.92f);
 		pushQuad(cross, { -w, -h * t, 0 }, { w, -h * t, 0 }, { w, h * t, 0 }, { -w, h * t, 0 }, tint, 1.0f);
 		pushQuad(cross, { -w * t, -h, 0 }, { w * t, -h, 0 }, { w * t, h, 0 }, { -w * t, h, 0 }, tint, 1.0f);
+
+		// hit marker: four short strokes on the diagonals, opening out as they go; red and larger for a kill
+		const float age = (float)(now - m_hit_time), life = m_hit_kill ? 0.32f : 0.20f;
+		if (age >= 0.0f && age < life) {
+			const float grow = age / life, size = m_hit_kill ? 1.45f : 1.0f;
+			const float inner = h * size * (1.05f + 0.55f * grow), outer = h * size * (2.0f + 0.55f * grow), thick = h * 0.16f * size;
+			const float aspect = (float)game_size.y / (float)game_size.x, d = 0.70710678f;
+			const glm::vec3 mark = m_hit_kill ? glm::vec3(1.0f, 0.25f, 0.18f) : glm::vec3(1.0f, 1.0f, 1.0f);
+			for (int k = 0; k < 4; k++) {
+				const float sx = (k & 1) ? 1.0f : -1.0f, sy = (k & 2) ? 1.0f : -1.0f;
+				const glm::vec2 dir = { sx * d, sy * d }, side = { -dir.y * thick, dir.x * thick };
+				const glm::vec2 a = dir * inner, b = dir * outer;
+				pushQuad(cross, { (a.x - side.x) * aspect, a.y - side.y, 0 }, { (b.x - side.x) * aspect, b.y - side.y, 0 }, { (b.x + side.x) * aspect, b.y + side.y, 0 },
+					{ (a.x + side.x) * aspect, a.y + side.y, 0 }, mark, 1.0f);
+			}
+		}
 		const glm::mat4 identity(1.0f);
 		glDisable(GL_DEPTH_TEST);
 		glUniformMatrix4fv(m_u_mvp, 1, GL_FALSE, &identity[0][0]);
