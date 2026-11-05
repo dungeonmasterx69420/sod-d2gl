@@ -427,6 +427,52 @@ inline void pushGroundSprite(std::vector<FpVertex>& out, const SpriteCell& cell,
 	pushQuadUV(out, p, uv, shades);
 }
 
+// Where the camera is, published for tools that measure how the view behaves.
+#pragma pack(push, 1)
+struct ViewBlock {
+	uint32_t seq;        // one more every frame drawn
+	float cam_x, cam_y;  // camera, in subtiles
+	float body_x, body_y; // the character under it
+	float yaw, pitch;
+	float move_x, move_y; // where the player is steering, zero when no key is held
+};
+#pragma pack(pop)
+
+void publishView(const ViewBlock& view)
+{
+	static ViewBlock* block = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		if (HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(ViewBlock), L"Local\\SoD_View_v1"))
+			block = (ViewBlock*)MapViewOfFile(map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(ViewBlock));
+	}
+	if (block) {
+		const uint32_t seq = block->seq + 1;
+		*block = view;
+		block->seq = seq;
+	}
+}
+
+// The loaded rooms with every cell classified, kept from the last world build (render thread).
+struct Room {
+	int level, x, y, w, h;
+	std::vector<uint8_t> cls;
+};
+std::vector<Room> g_rooms;
+
+// True where the character can stand: a floor cell of a loaded room.
+inline bool walkable(float x, float y)
+{
+	const int gx = (int)floorf(x), gy = (int)floorf(y);
+	for (const auto& room : g_rooms)
+		if (gx >= room.x && gy >= room.y && gx < room.x + room.w && gy < room.y + room.h) {
+			const uint8_t cls = room.cls[(size_t)(gy - room.y) * room.w + (gx - room.x)];
+			return cls == CELL_FLOOR || cls == CELL_ALT;
+		}
+	return false;
+}
+
 // An axis-aligned box from (x0, 0, z0) to (x1, h, z1): top and four sides.
 inline void pushBox(std::vector<FpVertex>& out, float x0, float z0, float x1, float z1, float y0, float h, glm::vec3 color)
 {
@@ -685,6 +731,7 @@ void FirstPerson::setLook(bool on)
 		if (m_moving)
 			writeMove(0.0f, 0.0f);
 		m_moving = false;
+		m_move_x = m_move_y = 0.0f;
 		m_lmb = m_rmb = false;
 	}
 }
@@ -819,9 +866,13 @@ void FirstPerson::update(bool active)
 		const float reach = glm::min(steerReach(x / len, y / len), 1.0f);
 		writeMove(x / len * reach, y / len * reach);
 		m_moving = true;
-	} else if (m_moving) {
-		writeMove(0.0f, 0.0f);
+		m_move_x = x / len;
+		m_move_y = y / len;
+	} else {
+		if (m_moving)
+			writeMove(0.0f, 0.0f);
 		m_moving = false;
+		m_move_x = m_move_y = 0.0f;
 	}
 
 	// ---- attacks: held buttons repeat ----
@@ -1037,11 +1088,7 @@ void FirstPerson::rebuildWorld()
 	const glm::vec3 low_color = { 0.40f, 0.33f, 0.24f };
 
 	// ---- classify every cell once ----
-	struct Room {
-		int level, x, y, w, h;
-		std::vector<uint8_t> cls;
-	};
-	static std::vector<Room> rooms;
+	auto& rooms = g_rooms;
 	rooms.clear();
 	const uint32_t count = glm::min(section->roomCount, hdr->maxRooms);
 	for (uint32_t r = 0; r < count; r++) {
@@ -1322,7 +1369,85 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		return raw;
 	};
 
-	const float px = m_cam_pos.x, pz = m_cam_pos.y;
+	// ---- the camera leads the character ----
+	// The game acts on input at its next step, so the character starts 60 to 100 ms after a key
+	// goes down, and after the key comes up it still walks to the nearest point a click can send
+	// it to: 1.5 to 2.8 subtiles, 2.4 on average. The camera hides both. While a key is held it
+	// sits ahead of the character by about that distance, so it starts at once. On release it
+	// stays where it is and the character walks up to it.
+	const glm::vec2 body = m_cam_pos;
+	const float frame_dt = glm::clamp((float)(now - m_lead_time), 0.0f, 0.1f);
+	m_lead_time = now;
+	if (!m_lead_valid || glm::distance(body, m_lead_body) > 6.0f) { // first frame, or a teleport
+		m_lead_body = body;
+		m_lead_off = { 0.0f, 0.0f };
+		m_lead_valid = true;
+	}
+	const glm::vec2 step = body - m_lead_body;
+	m_lead_body = body;
+	if (frame_dt > 0.0005f) {
+		const float speed = glm::length(step) / frame_dt;
+		if (speed > 2.0f)
+			m_lead_moved = now;
+		if (speed > 2.0f && speed < 40.0f)
+			m_lead_speed += (speed - m_lead_speed) * glm::min(1.0f, frame_dt * 4.0f);
+	}
+	const glm::vec2 intent = { m_move_x, m_move_y };
+	const bool steering = intent.x != 0.0f || intent.y != 0.0f;
+	if (steering && !m_lead_steering)
+		m_lead_press = now;
+	m_lead_steering = steering;
+	if (steering) {
+		const float lead = glm::clamp(m_lead_speed * 0.16f, 0.5f, 2.6f);
+		// Not into a wall: as far as the way ahead is open, less the room the character itself
+		// needs (it stops a good subtile short of anything solid). Not into a monster or a
+		// townsman either: the character stops in front of them.
+		const float margin = 1.25f;
+		float clear = 0.0f;
+		for (float d = 0.25f; d <= lead + margin; d += 0.25f) {
+			if (!walkable(body.x + intent.x * d, body.y + intent.y * d))
+				break;
+			clear = d;
+		}
+		const uint32_t lead_units = glm::min((uint32_t)meta->unitCount, hdr->maxUnits);
+		for (uint32_t i = 0; i < lead_units; i++) {
+			const UnitRecord& u = units[i];
+			if (u.type != 1 || u.mode == 0 || u.mode == 12)
+				continue; // only what stands in the way: monsters and townsfolk that are alive
+			const glm::vec2 rel = unitPos(u) - body;
+			const float along = rel.x * intent.x + rel.y * intent.y;
+			if (along <= 0.0f || along > lead + margin + 1.5f || fabsf(rel.x * intent.y - rel.y * intent.x) > 1.5f)
+				continue;
+			clear = glm::min(clear, glm::max(along - 0.75f, 0.0f));
+		}
+		// A character that does not get going (something is in the way) is not led.
+		const bool going = now - m_lead_press < 0.16 || now - m_lead_moved < 0.15;
+		const glm::vec2 target = going ? intent * glm::clamp(clear - margin, 0.0f, lead) : glm::vec2(0.0f);
+		// Ease towards it, but never faster than the character runs: until the character gets
+		// going, the camera moves the way a character that started at once would.
+		glm::vec2 move = (target - m_lead_off) * (1.0f - expf(-frame_dt / 0.1f));
+		const float most = m_lead_speed * frame_dt, len = glm::length(move);
+		if (len > most && len > 0.0f)
+			move *= most / len;
+		m_lead_off += move;
+	} else {
+		// Stay put while the character closes the gap. The gap never grows: a character walking
+		// on past the camera, or off to its side, takes the camera along.
+		const float before = glm::length(m_lead_off);
+		m_lead_off -= step;
+		const float after = glm::length(m_lead_off);
+		if (after > before && after > 0.0001f)
+			m_lead_off *= before / after;
+		// The character has stopped. Where it stopped short, the camera does not creep back to
+		// it: half a subtile either way is nothing to see, a view that slides after every stop
+		// is. Only a gap larger than that (the character never got there) is closed.
+		const float rest = glm::length(m_lead_off);
+		if (now - m_lead_moved > 0.1 && rest > 0.6f)
+			m_lead_off *= (0.6f + (rest - 0.6f) * expf(-frame_dt / 0.15f)) / rest;
+	}
+	m_lead_cam = body + m_lead_off;
+
+	const float px = m_lead_cam.x, pz = m_lead_cam.y;
 	if (!m_yaw_valid && player->dir64 >= 0) {
 		// start out facing the way the character faces; after that the mouse owns the camera
 		float start = ((float)player->dir64 + 0.5f) / 64.0f * glm::two_pi<float>() + glm::quarter_pi<float>();
@@ -1334,6 +1459,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	m_player_x = sample.x;
 	m_player_y = sample.y;
 	const float yaw = m_yaw, pitch = m_pitch;
+	publishView({ 0, px, pz, body.x, body.y, yaw, pitch, intent.x, intent.y });
 	const bool looking = m_look;
 	const glm::vec3 eye = { px, EYE_HEIGHT, pz };
 	const glm::vec3 dir = { cosf(yaw) * cosf(pitch), sinf(pitch), sinf(yaw) * cosf(pitch) };

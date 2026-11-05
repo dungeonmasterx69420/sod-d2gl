@@ -102,6 +102,13 @@ class FirstPerson {
 	uint32_t m_cam_tick = 0;
 	double m_cam_sample_time = 0.0, m_cam_last_time = 0.0;
 	glm::vec2 m_cam_sample = { 0.0f, 0.0f }, m_cam_velocity = { 0.0f, 0.0f }, m_cam_pos = { 0.0f, 0.0f };
+
+	// ---- camera lead: hides the game's input latency (see render) ----
+	volatile float m_move_x = 0.0f, m_move_y = 0.0f; // where the player is steering, game thread writes
+	bool m_lead_valid = false, m_lead_steering = false;
+	glm::vec2 m_lead_cam = { 0.0f, 0.0f }, m_lead_body = { 0.0f, 0.0f }, m_lead_off = { 0.0f, 0.0f };
+	float m_lead_speed = 12.0f;
+	double m_lead_time = 0.0, m_lead_press = 0.0, m_lead_moved = 0.0;
 	std::vector<uint8_t> m_room_copy;
 
 	FirstPerson() = default;
