@@ -644,21 +644,6 @@ void TileWorld::capture(bool active, bool inside)
 
 	m_ground = ground_count ? ground_sum / (float)ground_count : glm::vec3(-1.0f, 0.0f, 0.0f);
 
-	// ---- the ceiling of an indoor level: the floor's own picture overhead, in the dark ----
-	if (!ceilings.empty()) {
-		float height = CEILING_MAX;
-		if (wall_heights.size() >= 8) {
-			// on top of the walls: nearly the tallest, so that a few high pieces (a gate, a pillar) do not lift it
-			const size_t k = wall_heights.size() * 9 / 10;
-			std::nth_element(wall_heights.begin(), wall_heights.begin() + k, wall_heights.end());
-			height = glm::clamp(wall_heights[k], CEILING_MIN, CEILING_MAX);
-		}
-		for (const Ceiling& item : ceilings) {
-			const glm::vec3 top[4] = { { item.x, height, item.z }, { item.x + TILE, height, item.z }, { item.x + TILE, height, item.z + TILE }, { item.x, height, item.z + TILE } };
-			pushQuad(m_flat[item.page], top, item.uv, 95);
-		}
-	}
-
 	// ---- uprights ----
 	// A tree is wider than a tile, and the game keeps it as two halves on tiles that are side by
 	// side on screen: (x, y) and (x + 1, y - 1). Halves of one picture are put back together and
@@ -707,6 +692,7 @@ void TileWorld::capture(bool active, bool inside)
 			up.z = stand_z;
 			up.w = uw * PX;
 			up.h = vh * PX;
+			wall_heights.push_back(up.h);
 			up.cx = ((float)((int)(i - first) * 160 + art.left - foot) + uw * 0.5f) * PX;
 			up.bottom = (float)(low - art.low) * PX + lift;
 			up.page = art.page;
@@ -717,6 +703,24 @@ void TileWorld::capture(bool active, bool inside)
 			m_uprights.push_back(up);
 		}
 		first = last;
+	}
+
+	// ---- the ceiling of an indoor level: the floor's own picture overhead, in the dark ----
+	if (!ceilings.empty()) {
+		float height = CEILING_MAX;
+		// On top of what stands in the level, where the level is built of standing things (a
+		// sewer, a keep). A cave has only a stalagmite here and there; its walls are the ones
+		// built from the collision map, and it keeps their height.
+		if (wall_heights.size() >= 8 && wall_heights.size() * 12 >= ceilings.size()) {
+			// three quarters of the way up the list: the high pieces (a gate, a pillar) do not lift it
+			const size_t k = wall_heights.size() * 3 / 4;
+			std::nth_element(wall_heights.begin(), wall_heights.begin() + k, wall_heights.end());
+			height = glm::clamp(wall_heights[k], CEILING_MIN, CEILING_MAX);
+		}
+		for (const Ceiling& item : ceilings) {
+			const glm::vec3 top[4] = { { item.x, height, item.z }, { item.x + TILE, height, item.z }, { item.x + TILE, height, item.z + TILE }, { item.x, height, item.z + TILE } };
+			pushQuad(m_flat[item.page], top, item.uv, 95);
+		}
 	}
 	m_signature = signature;
 	m_version++;

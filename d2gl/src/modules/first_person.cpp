@@ -1190,6 +1190,54 @@ void FirstPerson::rebuildWorld()
 	wall_art.clear();
 
 	const TileWorld& tile_world = TileWorld::Instance();
+
+	// A building's wall is one picture on one tile, but what it blocks often reaches into the
+	// tiles next to it. Those tiles have wall cells and nothing standing on them, and a box built
+	// there shows as a dark block beside the building. So: the tiles with wall cells and nothing
+	// standing are gathered into patches, and a small patch that touches something standing is a
+	// spill-over and gets no box. A large one (a cliff, the rock of a cave) keeps its walls.
+	static std::unordered_set<uint32_t> bare, spill, visited;
+	static std::vector<uint32_t> stack, patch;
+	bare.clear();
+	spill.clear();
+	visited.clear();
+	const auto tileKey = [](int tx, int ty) { return ((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF); };
+	for (const auto& room : rooms) {
+		if (!tile_world.covers(room.x, room.y, room.w, room.h))
+			continue;
+		for (int y = 0; y < room.h; y++)
+			for (int x = 0; x < room.w; x++)
+				if (room.cls[y * room.w + x] == CELL_WALL) {
+					const int tx = floorDiv(room.x + x), ty = floorDiv(room.y + y);
+					if (!tile_world.standing(tx, ty))
+						bare.insert(tileKey(tx, ty));
+				}
+	}
+	for (const uint32_t first : bare) {
+		if (!visited.insert(first).second)
+			continue;
+		patch.clear();
+		stack.assign(1, first);
+		bool touches = false;
+		while (!stack.empty()) {
+			const uint32_t key = stack.back();
+			stack.pop_back();
+			patch.push_back(key);
+			const int tx = (int)(key >> 16), ty = (int)(key & 0xFFFF);
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy)
+						continue;
+					touches = touches || tile_world.standing(tx + dx, ty + dy);
+					const uint32_t next = tileKey(tx + dx, ty + dy);
+					if ((!dx || !dy) && bare.count(next) && visited.insert(next).second)
+						stack.push_back(next);
+				}
+		}
+		if (touches && patch.size() <= 12)
+			spill.insert(patch.begin(), patch.end());
+	}
+
 	for (const auto& room : rooms) {
 		// A room drawn from its own tiles needs nothing from here but the walls those tiles do not
 		// have: in a cave the rock is painted into the floor, and there is no wall tile to stand up.
@@ -1316,8 +1364,11 @@ void FirstPerson::rebuildWorld()
 						const int x = along_x ? b : a, y = along_x ? a : b;
 						const uint8_t here = room.cls[y * room.w + x], there = at(x + nx, y + nz);
 						face = pass == 0 ? here == CELL_WALL && isOpen(there) : here == CELL_LOW && (there == CELL_FLOOR || there == CELL_ALT);
-						if (face && tiled && tile_world.standing(floorDiv(room.x + x), floorDiv(room.y + y)))
-							face = false; // the game's own wall stands here
+						if (face && tiled) {
+							const int tx = floorDiv(room.x + x), ty = floorDiv(room.y + y);
+							if (tile_world.standing(tx, ty) || spill.count(tileKey(tx, ty)))
+								face = false; // the game's own wall stands here, or reaches over from the next tile
+						}
 					}
 					const bool boundary = ((base + b) % TILE + TILE) % TILE == 0;
 					if (start >= 0 && (!face || boundary)) {
