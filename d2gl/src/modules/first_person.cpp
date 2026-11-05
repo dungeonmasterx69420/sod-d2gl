@@ -752,9 +752,9 @@ void FirstPerson::fire(uint32_t hand)
 		const uint32_t type = m_target_type, id = m_target_id;
 		const bool hostile = type == 1 && !(m_target_flags & 0x0010);
 		if (hostile || hand == 1)
-			pushRecord(OP_ATTACK_UNIT, hand, type, 0.0f, 0.0f, id);
+			pushRecord(OP_ATTACK_UNIT, hand, type, m_target_x, m_target_y, id);
 		else
-			pushRecord(OP_INTERACT, 0, type, 0.0f, 0.0f, id);
+			pushRecord(OP_INTERACT, 0, type, m_target_x, m_target_y, id);
 		return;
 	}
 	const float reach = hand == 0 ? 3.0f : 12.0f;
@@ -1580,9 +1580,13 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		target_dist = along;
 	}
 	if (target >= 0) {
-		m_target_type = units[target].type;
-		m_target_id = units[target].id;
-		m_target_flags = units[target].rawFlags;
+		const UnitRecord& t = units[target];
+		const bool moves = t.type == 0 || t.type == 1 || t.type == 3;
+		m_target_type = t.type;
+		m_target_id = t.id;
+		m_target_flags = t.rawFlags;
+		m_target_x = moves ? (float)t.px / 65536.0f : (float)t.px + 0.5f;
+		m_target_y = moves ? (float)t.py / 65536.0f : (float)t.py + 0.5f;
 		InterlockedExchange(&m_target_valid, 1);
 	} else
 		InterlockedExchange(&m_target_valid, 0);

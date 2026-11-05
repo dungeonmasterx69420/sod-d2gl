@@ -75,6 +75,7 @@ class FirstPerson {
 	// ---- crosshair target and player position (written on the render thread) ----
 	volatile LONG m_target_valid = 0;
 	volatile uint32_t m_target_type = 0, m_target_id = 0, m_target_flags = 0;
+	volatile float m_target_x = 0.0f, m_target_y = 0.0f; // where it is: ids are not unique, the place tells units apart
 
 	// ---- hit marker ----
 	volatile DWORD m_fire_tick = 0;                  // when a mouse button last sent an attack (game thread writes)
