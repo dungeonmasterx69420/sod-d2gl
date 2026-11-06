@@ -318,6 +318,30 @@ struct ReliefMap {
 };
 ReliefMap g_relief; // render thread only
 
+// A mesh drawn from a list of indices: the mounds, where each point is shared by up to four quads.
+struct IndexedPart {
+	std::vector<FpVertex> verts;
+	std::vector<uint32_t> indices;
+};
+
+// What rebuildWorld builds the world in. The game is a 32-bit program without the large address
+// flag, so it has 2 GB, and the game and the video driver use much of it. Once the world is on
+// the card these lists are given back, not kept for the next build.
+struct WorldParts {
+	std::vector<FpVertex> plain;
+	std::map<int, std::vector<FpVertex>> floor_art, wall_art; // by level
+	std::map<int, IndexedPart> relief_art;                    // by page of the map tiles' atlas
+
+	void release()
+	{
+		std::vector<FpVertex>().swap(plain);
+		floor_art.clear();
+		wall_art.clear();
+		relief_art.clear();
+	}
+};
+WorldParts g_world_parts; // render thread only
+
 GLuint loadArtTexture(const std::string& path, float* width, float* height)
 {
 	int w = 0, h = 0, channels = 0;
@@ -1569,6 +1593,10 @@ bool FirstPerson::initGL()
 		glEnableVertexAttribArray(2);
 		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(FpVertex), (const void*)offsetof(FpVertex, u));
 	}
+	// the world's index list belongs to the world's vertex array
+	glGenBuffers(1, &m_ibo_world);
+	glBindVertexArray(m_vao_world);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo_world);
 
 	glBindVertexArray(prev_vao);
 	glBindBuffer(GL_ARRAY_BUFFER, prev_vbo);
@@ -1608,7 +1636,27 @@ void FirstPerson::ensureTarget(glm::uvec2 size)
 	m_fbo_size = size;
 }
 
+// A world too big for the memory the game has left must not end the game (an allocation that fails
+// throws, and nothing above here catches it). It is built again without the mounds, the largest
+// part, and failing that it is not drawn until the rooms change.
 void FirstPerson::rebuildWorld()
+{
+	for (int attempt = 0; attempt < 2; attempt++) {
+		try {
+			buildWorld(attempt == 0);
+			return;
+		} catch (const std::bad_alloc&) {
+			g_world_parts.release();
+			g_relief.w = g_relief.h = 0;
+			std::vector<uint8_t>().swap(g_relief.cells);
+			error_log("FirstPerson: out of memory building the world%s.", attempt == 0 ? ", building it again without mounds" : "");
+		}
+	}
+	m_batches.clear();
+	m_world_vertex_count = 0;
+}
+
+void FirstPerson::buildWorld(bool mounds)
 {
 	const auto hdr = (const StateHeader*)m_base;
 	const auto section = (const RoomSectionHeader*)m_room_copy.data();
@@ -1649,13 +1697,11 @@ void FirstPerson::rebuildWorld()
 	const auto isOpen = [](uint8_t c) { return c == CELL_FLOOR || c == CELL_ALT || c == CELL_LOW; };
 	const auto floorDiv = [](int v) { return v >= 0 ? v / TILE : -((-v + TILE - 1) / TILE); };
 
-	static std::vector<FpVertex> plain;
-	static std::map<int, std::vector<FpVertex>> floor_art, wall_art; // by level
-	static std::map<int, std::vector<FpVertex>> relief_art;          // by page of the map tiles' atlas
-	plain.clear();
-	floor_art.clear();
-	wall_art.clear();
-	relief_art.clear();
+	g_world_parts.release();
+	auto& plain = g_world_parts.plain;
+	auto& floor_art = g_world_parts.floor_art;
+	auto& wall_art = g_world_parts.wall_art;
+	auto& relief_art = g_world_parts.relief_art;
 
 	const TileWorld& tile_world = TileWorld::Instance();
 
@@ -1735,11 +1781,11 @@ void FirstPerson::rebuildWorld()
 	ReliefMap& relief = g_relief;
 	relief.x0 = lift_x0;
 	relief.y0 = lift_y0;
-	relief.w = lift_x1 > lift_x0 ? lift_x1 - lift_x0 : 0;
-	relief.h = lift_y1 > lift_y0 ? lift_y1 - lift_y0 : 0;
+	relief.w = mounds && lift_x1 > lift_x0 ? lift_x1 - lift_x0 : 0;
+	relief.h = mounds && lift_y1 > lift_y0 ? lift_y1 - lift_y0 : 0;
 	relief.cells.assign((size_t)relief.w * relief.h, 0);
 	for (const auto& room : rooms) {
-		if (!tile_world.covers(room.x, room.y, room.w, room.h))
+		if (!mounds || !tile_world.covers(room.x, room.y, room.w, room.h))
 			continue;
 		for (int y = 0; y < room.h; y++)
 			for (int x = 0; x < room.w; x++)
@@ -1751,7 +1797,29 @@ void FirstPerson::rebuildWorld()
 	const glm::vec3 SUN = glm::normalize(glm::vec3(-0.5f, 1.0f, -0.3f));
 	const float page_size = TileWorld::pageSize();
 	const int SPAN = PIECES + 3; // the cell's points and one ring beyond, for the slopes
+	const int POINTS = (PIECES + 1) * (PIECES + 1);
 	float height[SPAN][SPAN], rise[SPAN][SPAN];
+
+	// A cell's mound is a grid of points, each shared by the quads around it, drawn from a list of
+	// indices: about two fifths of the memory of a list of separate triangles. Each page's lists
+	// are made their full size at once: a list that grows needs its old block and a bigger new one
+	// at the same time, and in the docks of Kurast these run to tens of megabytes.
+	{
+		std::map<int, size_t> layers;
+		for (int gy = relief.y0; gy < relief.y0 + relief.h; gy++)
+			for (int gx = relief.x0; gx < relief.x0 + relief.w; gx++)
+				if (relief.at(gx, gy)) {
+					const TileWorld::TileFloors& on_tile = *tile_world.floors(floorDiv(gx), floorDiv(gy));
+					for (int layer = 0; layer < on_tile.count; layer++)
+						layers[on_tile.page[layer]]++;
+				}
+		for (const auto& item : layers) {
+			IndexedPart& part = relief_art[item.first];
+			part.verts.reserve(item.second * POINTS);
+			part.indices.reserve(item.second * PIECES * PIECES * 6);
+		}
+	}
+
 	for (int gy = relief.y0; gy < relief.y0 + relief.h; gy++)
 		for (int gx = relief.x0; gx < relief.x0 + relief.w; gx++) {
 			if (!relief.at(gx, gy))
@@ -1782,20 +1850,21 @@ void FirstPerson::rebuildWorld()
 					return glm::vec2((on_tile.u[layer] + 80.0f + (fx - fz) * 79.25f) / page_size, (on_tile.v[layer] + 0.75f + (fx + fz) * 39.25f) / page_size);
 				};
 				const float above = 0.004f * (float)layer;
-				std::vector<FpVertex>& batch = relief_art[on_tile.page[layer]];
+				IndexedPart& part = relief_art[on_tile.page[layer]];
+				const uint32_t first = (uint32_t)part.verts.size();
+				for (int j = 0; j <= PIECES; j++)
+					for (int i = 0; i <= PIECES; i++) {
+						const float px = (float)gx + i * step, pz = (float)gy + j * step;
+						const glm::vec2 uv = at(px, pz);
+						const uint8_t s = (uint8_t)glm::clamp(shade[j][i] * 200.0f, 0.0f, 255.0f); // as pushQuadUV
+						part.verts.push_back({ px, height[j + 1][i + 1] + above, pz, s, s, s, 255, uv.x, uv.y });
+					}
+				// each quad as pushQuadUV makes it: corners a b c d around, triangles a b c and a c d
 				for (int j = 0; j < PIECES; j++)
 					for (int i = 0; i < PIECES; i++) {
-						const int ci[4] = { i, i + 1, i + 1, i }, cj[4] = { j, j, j + 1, j + 1 };
-						glm::vec3 p[4];
-						glm::vec2 uv[4];
-						float shades[4];
-						for (int k = 0; k < 4; k++) {
-							const float px = (float)gx + ci[k] * step, pz = (float)gy + cj[k] * step;
-							p[k] = { px, height[cj[k] + 1][ci[k] + 1] + above, pz };
-							uv[k] = at(px, pz);
-							shades[k] = shade[cj[k]][ci[k]];
-						}
-						pushQuadUV(batch, p, uv, shades);
+						const uint32_t a = first + (uint32_t)(j * (PIECES + 1) + i), b = a + 1, d = a + (PIECES + 1), c = d + 1;
+						for (const uint32_t k : { a, b, c, a, c, d })
+							part.indices.push_back(k);
 					}
 			}
 		}
@@ -1944,29 +2013,63 @@ void FirstPerson::rebuildWorld()
 		}
 	}
 
-	// ---- one buffer, one batch per texture ----
-	static std::vector<FpVertex> verts;
-	verts.clear();
-	m_batches.clear();
-	const auto append = [&](const std::vector<FpVertex>& part, GLuint texture) {
-		if (part.empty())
-			return;
-		m_batches.push_back({ texture, (uint32_t)verts.size(), (uint32_t)part.size() });
-		verts.insert(verts.end(), part.begin(), part.end());
+	// ---- onto the card: one buffer of points, one of indices, one batch per texture ----
+	// Each part is copied straight to its place in the buffers; no copy of the whole world is made.
+	struct Upload {
+		const std::vector<FpVertex>* verts;
+		std::vector<uint32_t>* indices; // null: a list of triangles
+		GLuint texture;
 	};
-	append(plain, 0);
+	std::vector<Upload> uploads;
+	uploads.push_back({ &plain, nullptr, 0 });
 	for (const auto& item : floor_art)
-		append(item.second, g_level_art[item.first].floor_texture);
+		uploads.push_back({ &item.second, nullptr, g_level_art[item.first].floor_texture });
 	for (const auto& item : wall_art)
-		append(item.second, g_level_art[item.first].wall_texture);
-	for (const auto& item : relief_art)
+		uploads.push_back({ &item.second, nullptr, g_level_art[item.first].wall_texture });
+	for (auto& item : relief_art)
 		if (const GLuint texture = tile_world.texture(item.first))
-			append(item.second, texture);
+			uploads.push_back({ &item.second.verts, &item.second.indices, texture });
+	size_t vertex_total = 0, index_total = 0;
+	for (const auto& up : uploads) {
+		vertex_total += up.verts->size();
+		index_total += up.indices ? up.indices->size() : 0;
+	}
 
+	m_batches.clear();
+	m_world_vertex_count = 0;
+	for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; i++) {} // older errors are not this one's
+	GLint prev_vao = 0;
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+	glBindVertexArray(m_vao_world); // the index buffer binding is the vertex array's
 	glBindBuffer(GL_ARRAY_BUFFER, m_vbo_world);
-	glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(FpVertex), verts.data(), GL_STATIC_DRAW);
-	m_world_vertex_count = (uint32_t)verts.size();
-	trace_log("FirstPerson: world rebuilt (%u rooms, %u vertices, %u batches).", count, m_world_vertex_count, (uint32_t)m_batches.size());
+	glBufferData(GL_ARRAY_BUFFER, vertex_total * sizeof(FpVertex), nullptr, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo_world);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_total * sizeof(uint32_t), nullptr, GL_STATIC_DRAW);
+	if (glGetError() == GL_OUT_OF_MEMORY) {
+		glBindVertexArray(prev_vao);
+		throw std::bad_alloc();
+	}
+	uint32_t vertex_at = 0, index_at = 0;
+	for (const auto& up : uploads) {
+		const uint32_t n = (uint32_t)up.verts->size();
+		if (!n)
+			continue;
+		glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)vertex_at * sizeof(FpVertex), (GLsizeiptr)n * sizeof(FpVertex), up.verts->data());
+		if (up.indices) {
+			for (uint32_t& k : *up.indices)
+				k += vertex_at;
+			const uint32_t m = (uint32_t)up.indices->size();
+			glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)index_at * sizeof(uint32_t), (GLsizeiptr)m * sizeof(uint32_t), up.indices->data());
+			m_batches.push_back({ up.texture, index_at, m, true });
+			index_at += m;
+		} else
+			m_batches.push_back({ up.texture, vertex_at, n, false });
+		vertex_at += n;
+	}
+	glBindVertexArray(prev_vao);
+	m_world_vertex_count = vertex_at;
+	g_world_parts.release();
+	trace_log("FirstPerson: world rebuilt (%u rooms, %u vertices, %u indices, %u batches%s).", count, vertex_at, index_at, (uint32_t)m_batches.size(), mounds ? "" : ", no mounds");
 }
 
 void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attachment_count)
@@ -2575,7 +2678,10 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			if (batch.texture)
 				glBindTexture(GL_TEXTURE_2D, batch.texture);
 			glUniform1f(m_u_textured, batch.texture ? 1.0f : 0.0f);
-			glDrawArrays(GL_TRIANGLES, batch.first, batch.count);
+			if (batch.indexed)
+				glDrawElements(GL_TRIANGLES, batch.count, GL_UNSIGNED_INT, (const void*)((size_t)batch.first * sizeof(uint32_t)));
+			else
+				glDrawArrays(GL_TRIANGLES, batch.first, batch.count);
 		}
 		glUniform1f(m_u_textured, 0.0f);
 	}

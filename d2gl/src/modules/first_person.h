@@ -44,12 +44,13 @@ class FirstPerson {
 	GLint m_u_mvp = -1, m_u_eye = -1, m_u_fog = -1, m_u_flat = -1;
 	GLuint m_fbo = 0, m_color = 0, m_depth = 0;
 	glm::uvec2 m_fbo_size = { 0, 0 };
-	GLuint m_vao_world = 0, m_vbo_world = 0;
+	GLuint m_vao_world = 0, m_vbo_world = 0, m_ibo_world = 0;
 	GLuint m_vao_units = 0, m_vbo_units = 0;
 	uint32_t m_world_vertex_count = 0;
 	struct Batch {
 		GLuint texture; // 0 = flat colour
-		uint32_t first, count;
+		uint32_t first, count; // vertices, or indices when indexed
+		bool indexed;
 	};
 	std::vector<Batch> m_batches;
 	GLint m_u_textured = -1, m_u_texture = -1, m_u_additive = -1, m_u_sharp = -1;
@@ -187,6 +188,7 @@ class FirstPerson {
 	bool initGL();
 	void ensureTarget(glm::uvec2 size);
 	void rebuildWorld();
+	void buildWorld(bool mounds);
 
 public:
 	static FirstPerson& Instance()
