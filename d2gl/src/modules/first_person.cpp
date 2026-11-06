@@ -251,6 +251,73 @@ inline const ArtTile& weighted(const std::vector<ArtTile>& list, float total, fl
 	return list.back();
 }
 
+// ---- mounds: blocked cells of the floor that rise out of the ground (built in rebuildWorld) ----
+// A mound has no sides. It climbs out of the ground at the edge of the blocked cells and is
+// level on top only where the blocked patch is wide: a thin line of blocked cells makes a low
+// ridge, a broad heap a full one.
+struct ReliefMap {
+	static constexpr float REACH = 1.5f; // how far in from its edge a mound reaches its full height
+	static constexpr float SINK = 0.03f; // the foot starts just under the ground, so the two meet in a clean line
+
+	int x0 = 0, y0 = 0, w = 0, h = 0; // subtiles
+	std::vector<uint8_t> cells;       // 1 = rises
+
+	bool at(int gx, int gy) const
+	{
+		const int x = gx - x0, y = gy - y0;
+		return x >= 0 && y >= 0 && x < w && y < h && cells[(size_t)y * w + x];
+	}
+
+	// how far a point is from the nearest cell that does not rise (up to REACH)
+	float edgeDistance(float px, float pz) const
+	{
+		float best = REACH;
+		const int cx0 = (int)floorf(px - REACH), cx1 = (int)floorf(px + REACH);
+		const int cz0 = (int)floorf(pz - REACH), cz1 = (int)floorf(pz + REACH);
+		for (int cz = cz0; cz <= cz1; cz++)
+			for (int cx = cx0; cx <= cx1; cx++) {
+				if (at(cx, cz))
+					continue;
+				const float dx = glm::max(glm::max((float)cx - px, px - (float)(cx + 1)), 0.0f);
+				const float dz = glm::max(glm::max((float)cz - pz, pz - (float)(cz + 1)), 0.0f);
+				best = glm::min(best, sqrtf(dx * dx + dz * dz));
+			}
+		return best;
+	}
+
+	// soft lumps, so a mound is not a smooth cushion; the same at a point whichever cell asks
+	static float lump(float px, float pz)
+	{
+		const float sx = px * 1.3f, sz = pz * 1.3f;
+		const int ix = (int)floorf(sx), iz = (int)floorf(sz);
+		float fx = sx - (float)ix, fz = sz - (float)iz;
+		fx = fx * fx * (3.0f - 2.0f * fx);
+		fz = fz * fz * (3.0f - 2.0f * fz);
+		const float a = hash3(ix, iz, 7), b = hash3(ix + 1, iz, 7), c = hash3(ix, iz + 1, 7), d = hash3(ix + 1, iz + 1, 7);
+		return glm::mix(glm::mix(a, b, fx), glm::mix(c, d, fx), fz) * 2.0f - 1.0f;
+	}
+
+	// the mound's surface at a point, and how far up its side the point is (0 foot .. 1 top);
+	// a little under the ground at the foot
+	float surface(float px, float pz, float* rise = nullptr) const
+	{
+		const float t = edgeDistance(px, pz) / REACH;
+		const float s = 0.5f * (sinf(t * 1.5707963f) + t * t * (3.0f - 2.0f * t)); // steep at the foot, level on top
+		if (rise)
+			*rise = s;
+		return RELIEF_HEIGHT * s * (1.0f + 0.2f * lump(px, pz)) - SINK;
+	}
+
+	// where something standing at a point stands: on a mound, its top; elsewhere the ground
+	float ground(float px, float pz) const
+	{
+		if (!at((int)floorf(px), (int)floorf(pz)))
+			return 0.0f;
+		return glm::max(surface(px, pz), 0.0f);
+	}
+};
+ReliefMap g_relief; // render thread only
+
 GLuint loadArtTexture(const std::string& path, float* width, float* height)
 {
 	int w = 0, h = 0, channels = 0;
@@ -1506,10 +1573,12 @@ void FirstPerson::rebuildWorld()
 	}
 
 	// The game paints many things into the floor: a forge and its anvil, a heap of rubble, a
-	// camp's litter. In its own view they look solid. Laid flat they are a picture on the ground,
-	// and the character stops at something the player cannot see. Where the character cannot
-	// walk and nothing of the game's stands (no wall, no tree), that part of the floor is raised
-	// into a block that carries the floor's own picture. Not water or lava.
+	// camp's litter, a rock. In its own view they look solid. Laid flat they are a picture on the
+	// ground, and the character stops at something the player cannot see. Where the character
+	// cannot walk and nothing of the game's stands (no wall, no tree), that part of the floor
+	// rises into a mound that carries the floor's own picture. Not water or lava.
+	// (ReliefMap says how.) The picture lies on the mound from above, so none of it is pulled
+	// down a wall into stripes.
 	const auto raised = [&](int gx, int gy) -> bool {
 		if (classAt(gx, gy) != CELL_LOW)
 			return false;
@@ -1519,54 +1588,83 @@ void FirstPerson::rebuildWorld()
 		const TileWorld::TileFloors* on_tile = tile_world.floors(tx, ty);
 		return on_tile && on_tile->count > 0 && !on_tile->liquid;
 	};
-	const float page_size = TileWorld::pageSize();
+
+	// which cells rise, once, in one grid over the rooms drawn from their tiles
+	int lift_x0 = INT_MAX, lift_y0 = INT_MAX, lift_x1 = INT_MIN, lift_y1 = INT_MIN;
+	for (const auto& room : rooms)
+		if (tile_world.covers(room.x, room.y, room.w, room.h)) {
+			lift_x0 = glm::min(lift_x0, room.x);
+			lift_y0 = glm::min(lift_y0, room.y);
+			lift_x1 = glm::max(lift_x1, room.x + room.w);
+			lift_y1 = glm::max(lift_y1, room.y + room.h);
+		}
+	ReliefMap& relief = g_relief;
+	relief.x0 = lift_x0;
+	relief.y0 = lift_y0;
+	relief.w = lift_x1 > lift_x0 ? lift_x1 - lift_x0 : 0;
+	relief.h = lift_y1 > lift_y0 ? lift_y1 - lift_y0 : 0;
+	relief.cells.assign((size_t)relief.w * relief.h, 0);
 	for (const auto& room : rooms) {
 		if (!tile_world.covers(room.x, room.y, room.w, room.h))
 			continue;
 		for (int y = 0; y < room.h; y++)
-			for (int x = 0; x < room.w; x++) {
-				if (room.cls[y * room.w + x] != CELL_LOW)
-					continue;
-				const int gx = room.x + x, gy = room.y + y;
-				if (!raised(gx, gy))
-					continue;
-				const int tx = floorDiv(gx), ty = floorDiv(gy);
-				const TileWorld::TileFloors& on_tile = *tile_world.floors(tx, ty);
-				const float x0 = (float)gx, x1 = x0 + 1.0f, z0 = (float)gy, z1 = z0 + 1.0f;
-				const bool open[4] = { !raised(gx, gy - 1), !raised(gx + 1, gy), !raised(gx, gy + 1), !raised(gx - 1, gy) };
-				for (int layer = 0; layer < on_tile.count; layer++) {
-					// where a point of the tile is in its picture: the tile is a diamond there
-					const auto at = [&](float wx, float wz) {
-						const float fx = (wx - (float)(tx * TILE)) / TILE, fz = (wz - (float)(ty * TILE)) / TILE;
-						return glm::vec2((on_tile.u[layer] + 80.0f + (fx - fz) * 79.25f) / page_size, (on_tile.v[layer] + 0.75f + (fx + fz) * 39.25f) / page_size);
-					};
-					const float lift = RELIEF_HEIGHT + 0.004f * (float)layer, out = 0.004f * (float)layer;
-					std::vector<FpVertex>& batch = relief_art[on_tile.page[layer]];
-					const glm::vec3 top[4] = { { x0, lift, z0 }, { x1, lift, z0 }, { x1, lift, z1 }, { x0, lift, z1 } };
-					const glm::vec2 top_uv[4] = { at(x0, z0), at(x1, z0), at(x1, z1), at(x0, z1) };
-					const float lit[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-					pushQuadUV(batch, top, top_uv, lit);
-					// the sides carry the colours of the edge they hang from
-					const glm::vec2 corner[4] = { { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
-					const glm::vec2 push[4] = { { 0.0f, -out }, { out, 0.0f }, { 0.0f, out }, { -out, 0.0f } };
-					const float side_shade[4] = { 0.62f, 0.8f, 0.7f, 0.55f };
-					for (int side = 0; side < 4; side++) {
-						if (!open[side])
-							continue;
-						const glm::vec2 a = corner[side], b = corner[(side + 1) % 4];
-						// sampled a little inside the cell, so the side takes this cell's colours
-						const glm::vec2 middle = { x0 + 0.5f, z0 + 0.5f };
-						const glm::vec2 ua = at(a.x + (middle.x - a.x) * 0.2f, a.y + (middle.y - a.y) * 0.2f), ub = at(b.x + (middle.x - b.x) * 0.2f, b.y + (middle.y - b.y) * 0.2f);
-						const glm::vec3 p[4] = { { a.x + push[side].x, 0.0f, a.y + push[side].y }, { b.x + push[side].x, 0.0f, b.y + push[side].y },
-							{ b.x + push[side].x, lift, b.y + push[side].y }, { a.x + push[side].x, lift, a.y + push[side].y } };
-						const glm::vec2 uv[4] = { ua, ub, ub, ua };
-						const float s = side_shade[side];
-						const float shades[4] = { s * 0.8f, s * 0.8f, s, s };
+			for (int x = 0; x < room.w; x++)
+				if (room.cls[y * room.w + x] == CELL_LOW && raised(room.x + x, room.y + y))
+					relief.cells[(size_t)(room.y + y - relief.y0) * relief.w + (room.x + x - relief.x0)] = 1;
+	}
+
+	const int PIECES = 4; // a cell's mound is PIECES x PIECES quads
+	const glm::vec3 SUN = glm::normalize(glm::vec3(-0.5f, 1.0f, -0.3f));
+	const float page_size = TileWorld::pageSize();
+	const int SPAN = PIECES + 3; // the cell's points and one ring beyond, for the slopes
+	float height[SPAN][SPAN], rise[SPAN][SPAN];
+	for (int gy = relief.y0; gy < relief.y0 + relief.h; gy++)
+		for (int gx = relief.x0; gx < relief.x0 + relief.w; gx++) {
+			if (!relief.at(gx, gy))
+				continue;
+			const int tx = floorDiv(gx), ty = floorDiv(gy);
+			const TileWorld::TileFloors& on_tile = *tile_world.floors(tx, ty);
+			const float step = 1.0f / PIECES;
+			for (int j = 0; j < SPAN; j++)
+				for (int i = 0; i < SPAN; i++)
+					height[j][i] = relief.surface((float)gx + (i - 1) * step, (float)gy + (j - 1) * step, &rise[j][i]);
+
+			// each point's brightness: lit from one side, a little darker low on the slope
+			float shade[PIECES + 1][PIECES + 1];
+			for (int j = 0; j <= PIECES; j++)
+				for (int i = 0; i <= PIECES; i++) {
+					const float dx = (height[j + 1][i + 2] - height[j + 1][i]) / (2.0f * step);
+					const float dz = (height[j + 2][i + 1] - height[j][i + 1]) / (2.0f * step);
+					const glm::vec3 n = glm::normalize(glm::vec3(-dx, 1.0f, -dz));
+					const float sun = glm::clamp(glm::dot(n, SUN) / SUN.y, 0.45f, 1.15f);
+					const float foot = 0.85f + 0.15f * glm::min(rise[j + 1][i + 1] * 2.0f, 1.0f);
+					shade[j][i] = sun * foot;
+				}
+
+			for (int layer = 0; layer < on_tile.count; layer++) {
+				// where a point of the tile is in its picture: the tile is a diamond there
+				const auto at = [&](float wx, float wz) {
+					const float fx = (wx - (float)(tx * TILE)) / TILE, fz = (wz - (float)(ty * TILE)) / TILE;
+					return glm::vec2((on_tile.u[layer] + 80.0f + (fx - fz) * 79.25f) / page_size, (on_tile.v[layer] + 0.75f + (fx + fz) * 39.25f) / page_size);
+				};
+				const float above = 0.004f * (float)layer;
+				std::vector<FpVertex>& batch = relief_art[on_tile.page[layer]];
+				for (int j = 0; j < PIECES; j++)
+					for (int i = 0; i < PIECES; i++) {
+						const int ci[4] = { i, i + 1, i + 1, i }, cj[4] = { j, j, j + 1, j + 1 };
+						glm::vec3 p[4];
+						glm::vec2 uv[4];
+						float shades[4];
+						for (int k = 0; k < 4; k++) {
+							const float px = (float)gx + ci[k] * step, pz = (float)gy + cj[k] * step;
+							p[k] = { px, height[cj[k] + 1][ci[k] + 1] + above, pz };
+							uv[k] = at(px, pz);
+							shades[k] = shade[cj[k]][ci[k]];
+						}
 						pushQuadUV(batch, p, uv, shades);
 					}
-				}
 			}
-	}
+		}
 
 	for (const auto& room : rooms) {
 		// A room drawn from its own tiles needs nothing from here but the walls those tiles do not
@@ -2117,7 +2215,8 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 					else
 						frame = mode_index == 0 ? 0 : count - 1; // a one-shot animation with no clock: show where it ends
 				}
-				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, shade);
+				// a thing on a mound (a camp's fire on its heap of stones) stands on top of it
+				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, g_relief.ground(ux, uz), px, pz, shade);
 				drawn = true;
 			} break;
 			case 3: {
