@@ -72,7 +72,7 @@ bool parseLayout(const json& doc, Sprite& sprite)
 	sprite.directions = (int)rows.size();
 	sprite.frames = (int)rows[0].size();
 	sprite.cells.assign((size_t)sprite.directions * sprite.frames, SpriteCell());
-	float top = 0.0f;
+	float top = 0.0f, bottom = 0.0f;
 	for (int d = 0; d < sprite.directions; d++) {
 		const auto& row = rows[d];
 		for (int f = 0; f < sprite.frames && f < (int)row.size(); f++) {
@@ -96,11 +96,14 @@ bool parseLayout(const json& doc, Sprite& sprite)
 			cell.cy = anchor_y - by - bh * 0.5f;
 			cell.w = bw;
 			cell.h = bh;
-			if (d == 0)
+			if (d == 0) {
 				top = glm::max(top, anchor_y - by);
+				bottom = glm::max(bottom, by + bh - anchor_y);
+			}
 		}
 	}
 	sprite.top = glm::max(top, 8.0f);
+	sprite.bottom = bottom;
 
 	for (int i = 0; i < 64; i++)
 		sprite.dir64[i] = (uint8_t)(i * sprite.directions / 64);
@@ -152,6 +155,8 @@ bool SpriteStore::loadIndexes()
 		info.token = row.value("code", std::string());
 		info.hidden = row.value("hidden", false);
 		info.ally = row.value("ally", false);
+		if (row.contains("overlayHeight") && row["overlayHeight"].is_number_integer())
+			info.overlay_height = row["overlayHeight"].get<int>();
 		if (row.contains("sprite") && row["sprite"].is_object()) {
 			const auto& as = row["sprite"];
 			info.kind = as.value("kind", std::string("monster"));
@@ -202,6 +207,65 @@ bool SpriteStore::loadIndexes()
 	return true;
 }
 
+bool SpriteStore::loadOverlays()
+{
+	const json doc = readJson(std::string(ART_DIR) + "index\\overlays.json");
+	if (!doc.is_object() || !doc.contains("overlays") || !doc.contains("states") || !doc["overlays"].is_object() || !doc["states"].is_object())
+		return false;
+
+	m_overlays.clear();
+	m_states.clear();
+	m_skill_casts.clear();
+	for (const auto& item : doc["overlays"].items()) {
+		const auto& row = item.value();
+		OverlayInfo info;
+		info.token = row.value("token", std::string());
+		if (info.token.empty())
+			continue;
+		// the game's overlay clock: AnimRate 16 is a frame every game frame, 25 a second
+		info.fps = glm::clamp(25.0f * (float)row.value("animRate", 16) / 16.0f, 1.0f, 60.0f);
+		info.loop_wait = (float)row.value("loopWait", 0) / 25.0f;
+		info.trans = row.value("trans", 3);
+		info.pre_draw = row.value("preDraw", false);
+		info.xoff = (float)row.value("xoff", 0);
+		info.yoff = (float)row.value("yoff", 0);
+		if (row.contains("height") && row["height"].is_array())
+			for (size_t i = 0; i < 4 && i < row["height"].size(); i++)
+				info.height[i] = row["height"][i].get<float>();
+		m_overlays[item.key()] = info;
+	}
+	const auto find = [this](const json& name) -> const OverlayInfo* {
+		if (!name.is_string())
+			return nullptr;
+		const auto it = m_overlays.find(name.get<std::string>());
+		return it == m_overlays.end() ? nullptr : &it->second;
+	};
+	for (const auto& item : doc["states"].items()) {
+		const uint32_t id = (uint32_t)atoi(item.key().c_str());
+		if (id >= 1024)
+			continue;
+		if (m_states.size() <= id)
+			m_states.resize(id + 1);
+		const auto& row = item.value();
+		StateInfo& state = m_states[id];
+		if (row.contains("overlays") && row["overlays"].is_array())
+			for (const auto& name : row["overlays"])
+				if (const OverlayInfo* info = find(name))
+					state.overlays.push_back(info);
+		if (row.contains("cast"))
+			state.cast = find(row["cast"]);
+		if (row.contains("remove"))
+			state.remove = find(row["remove"]);
+		state.aura = row.value("aura", false);
+		state.curse = row.value("curse", false);
+	}
+	if (doc.contains("skills") && doc["skills"].is_object())
+		for (const auto& item : doc["skills"].items())
+			if (const OverlayInfo* info = item.value().contains("cast") ? find(item.value()["cast"]) : nullptr)
+				m_skill_casts[(uint32_t)atoi(item.key().c_str())] = info;
+	return true;
+}
+
 SpriteStore::Result SpriteStore::runJob(const Job& job)
 {
 	Result result;
@@ -221,6 +285,24 @@ SpriteStore::Result SpriteStore::runJob(const Job& job)
 		stbi_set_flip_vertically_on_load_thread(0);
 		result.pixels = stbi_load((base + ".png").c_str(), &result.width, &result.height, &channels, 4);
 		result.outcome = result.pixels ? 1 : 2;
+		if (result.pixels && job.kind == "overlay") {
+			// its colour, for when the picture itself cannot be shown (the player's own aura): the
+			// brighter pixels count for more, as they do when the game adds the picture to the view
+			double r = 0.0, g = 0.0, b = 0.0;
+			const size_t count = (size_t)result.width * result.height;
+			for (size_t i = 0; i < count; i++) {
+				const uint8_t* px = result.pixels + i * 4;
+				if (px[3] < 128)
+					continue;
+				const double weight = (double)glm::max(px[0], glm::max(px[1], px[2]));
+				r += px[0] * weight;
+				g += px[1] * weight;
+				b += px[2] * weight;
+			}
+			const double peak = glm::max(r, glm::max(g, b));
+			if (peak > 0.0)
+				result.sprite.tint = { (float)(r / peak), (float)(g / peak), (float)(b / peak) };
+		}
 		return result;
 	}
 	if (fileExists(base + ".fail")) {
@@ -255,12 +337,20 @@ void SpriteStore::workerMain()
 			return;
 	}
 	m_index_ready = true;
+	m_overlays_ready = loadOverlays();
 
 	for (;;) {
 		Job job;
 		{
 			std::unique_lock<std::mutex> lock(m_lock);
-			m_wake.wait(lock, [this] { return m_quit || !m_jobs.empty(); });
+			if (m_overlays_ready)
+				m_wake.wait(lock, [this] { return m_quit || !m_jobs.empty(); });
+			else if (!m_wake.wait_for(lock, std::chrono::seconds(3), [this] { return m_quit || !m_jobs.empty(); })) {
+				// the overlay index may come after the others (a service that is still writing them)
+				lock.unlock();
+				m_overlays_ready = loadOverlays();
+				continue;
+			}
 			if (m_quit)
 				return;
 			job = m_jobs.front();
@@ -404,6 +494,22 @@ const std::string* SpriteStore::itemType(const std::string& code) const
 {
 	const auto it = m_item_types.find(code);
 	return it == m_item_types.end() ? nullptr : &it->second;
+}
+
+const StateInfo* SpriteStore::state(uint32_t id) const
+{
+	if (!m_overlays_ready || id >= m_states.size())
+		return nullptr;
+	const StateInfo& state = m_states[id];
+	return state.overlays.empty() && !state.cast && !state.remove ? nullptr : &state;
+}
+
+const OverlayInfo* SpriteStore::skillCast(uint32_t skill) const
+{
+	if (!m_overlays_ready)
+		return nullptr;
+	const auto it = m_skill_casts.find(skill);
+	return it == m_skill_casts.end() ? nullptr : it->second;
 }
 
 const std::string* SpriteStore::itemFlippy(const std::string& code) const

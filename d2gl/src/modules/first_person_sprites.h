@@ -39,6 +39,8 @@ struct Sprite {
 	float iso_yaw = 3.926991f;     // the yaw of the isometric camera the art was drawn for
 	float fps = 12.5f;
 	float top = 60.0f;             // pixels from the feet to the top of the tallest frame
+	float bottom = 0.0f;           // pixels the lowest frame reaches below the feet (a ring on the ground)
+	glm::vec3 tint = { 1.0f, 1.0f, 1.0f }; // the picture's colour, brightest channel 1 (overlay sheets only)
 	std::string mode;              // the mode actually drawn (a missing one is served by a substitute)
 
 	inline const SpriteCell& cell(int direction, int frame) const
@@ -70,6 +72,26 @@ struct MonsterInfo {
 	float shade = 1.0f;            // an Assassin's shadow is her own figure, dark
 	bool hidden = false;           // something the game never shows (a spawner, a vine under the ground)
 	bool ally = false;             // fights on the player's side: a summoned creature, a trap, a hireling
+	int overlay_height = 2;        // monstats2 OverlayHeight: which of an overlay's four heights fits it
+};
+
+// A picture the game lays over a unit (overlay.txt): an aura, a curse, a shout, a cast flash.
+struct OverlayInfo {
+	std::string token;
+	float fps = 25.0f;
+	float loop_wait = 0.0f;   // seconds between loops
+	int trans = 3;            // the game's draw mode: 5 normal, 0-2 see-through, 3 and up glowing
+	bool pre_draw = false;    // drawn behind the unit
+	float xoff = 0.0f, yoff = 0.0f; // screen pixels
+	float height[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // more y offset, by the unit's overlay height 1-4
+};
+
+// What a state (states.txt) lays on a unit while it lasts, and once as it starts and ends.
+struct StateInfo {
+	std::vector<const OverlayInfo*> overlays;
+	const OverlayInfo* cast = nullptr;
+	const OverlayInfo* remove = nullptr;
+	bool aura = false, curse = false;
 };
 
 struct MissileInfo {
@@ -117,12 +139,18 @@ class SpriteStore {
 	std::unordered_map<uint32_t, MissileInfo> m_missiles;
 	std::unordered_map<std::string, std::string> m_item_flippies;
 	std::unordered_map<std::string, std::string> m_item_names, m_item_types;
+	// overlays.json: optional (an older art service does not write it), so it is tried again later
+	volatile bool m_overlays_ready = false;
+	std::unordered_map<std::string, OverlayInfo> m_overlays;
+	std::vector<StateInfo> m_states; // by state number
+	std::unordered_map<uint32_t, const OverlayInfo*> m_skill_casts;
 
 	SpriteStore() = default;
 	~SpriteStore();
 
 	void workerMain();
 	bool loadIndexes();
+	bool loadOverlays();
 	Result runJob(const Job& job);
 
 public:
@@ -146,6 +174,10 @@ public:
 	// An item's plain name ("Short Sword") and its type ("rune", "gold", ...) by item code.
 	const std::string* itemName(const std::string& code) const;
 	const std::string* itemType(const std::string& code) const;
+	// A state's overlays by state number, and the overlay a skill flashes on whoever uses it.
+	const StateInfo* state(uint32_t id) const;
+	const OverlayInfo* skillCast(uint32_t skill) const;
+	inline bool overlaysReady() const { return m_overlays_ready; }
 };
 
 }

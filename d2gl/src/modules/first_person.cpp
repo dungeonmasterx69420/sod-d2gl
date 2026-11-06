@@ -499,6 +499,30 @@ inline void pushGroundSprite(std::vector<FpVertex>& out, const SpriteCell& cell,
 	pushQuadUV(out, p, uv, shades);
 }
 
+// A picture the game paints on the ground around a unit (an aura's ring, a shout's circle), laid
+// flat: each pixel goes back to the spot of ground the isometric view showed there, subtile (x, y)
+// being drawn at ((x - y) * 16, (x + y) * 8). `sx` / `sy` shift it in screen pixels as the game would.
+inline void pushIsoGround(std::vector<FpVertex>& out, const SpriteCell& cell, float ux, float uz, float y, float sx, float sy, float shade)
+{
+	if (!cell.valid)
+		return;
+	const float left = cell.cx - cell.w * 0.5f + sx, right = cell.cx + cell.w * 0.5f + sx;
+	const float top = -(cell.cy + cell.h * 0.5f) + sy, bottom = -(cell.cy - cell.h * 0.5f) + sy; // screen y grows downwards
+	const auto ground = [&](float px, float py) { return glm::vec3(ux + px / 32.0f + py / 16.0f, y, uz + py / 16.0f - px / 32.0f); };
+	const glm::vec3 p[4] = { ground(left, bottom), ground(right, bottom), ground(right, top), ground(left, top) };
+	const glm::vec2 uv[4] = { { cell.u0, cell.v1 }, { cell.u1, cell.v1 }, { cell.u1, cell.v0 }, { cell.u0, cell.v0 } };
+	const float shades[4] = { shade, shade, shade, shade };
+	pushQuadUV(out, p, uv, shades);
+}
+
+// Modes in which a unit uses a skill: attacks, casting, throwing, kicking, the special moves.
+inline bool skillMode(bool player, uint16_t mode)
+{
+	if (player)
+		return mode == 7 || mode == 8 || (mode >= 10 && mode <= 16); // A1 A2 SC TH KK S1-S4
+	return mode == 4 || mode == 5 || (mode >= 7 && mode <= 11);      // A1 A2 SC S1-S4
+}
+
 // Where the camera is, published for tools that measure how the view behaves.
 #pragma pack(push, 1)
 struct ViewBlock {
@@ -580,9 +604,16 @@ uniform float u_Additive; // 1 = drawn with additive blending (glowing missiles)
 uniform sampler2D u_Texture;
 uniform vec4 u_Fog; // rgb = colour, a = far distance
 uniform float u_Sharp; // 1 = keep the art's own pixels crisp when it is drawn larger than it was made
-uniform float u_Flat; // 1 = plain colour (overlay), 2 = text: the colour, with the texture's alpha
+uniform float u_Flat; // 1 = plain colour (overlay), 2 = text: the colour, with the texture's alpha, 3 = edge glow
 layout(location = 0) out vec4 FragColor;
 void main() {
+	if (u_Flat > 2.5) {
+		// the colour along the edges of the view, a rim about a tenth of it deep (added)
+		vec2 p = abs(v_World.xy);
+		float edge = smoothstep(0.78, 1.12, pow(pow(p.x, 4.0) + pow(p.y, 4.0), 0.25));
+		FragColor = vec4(v_Color.rgb * edge, 1.0);
+		return;
+	}
 	if (u_Flat > 1.5) {
 		FragColor = vec4(v_Color.rgb, v_Color.a * texture(u_Texture, v_TexCoord).a);
 		return;
@@ -1120,11 +1151,114 @@ void FirstPerson::capturePositions()
 
 	// the map tiles of the rooms around the player (F7 switches them off, for comparing)
 	TileWorld::Instance().capture(m_frame_active && m_real_tiles, m_inside_level);
+	captureStates();
 
 	std::lock_guard<std::mutex> lock(m_pred_lock);
 	m_pred_player_valid = valid;
 	m_pred_player = player;
 	m_pred_units.swap(m_pred_units_scratch);
+	m_unit_states.swap(m_unit_states_scratch);
+}
+
+// The states (auras, curses, shouts, armours) and the skill in use of every player and monster the
+// game client has, read the way the game itself reads them (1.13c, docs/GAME-MEMORY.md of Scrolls
+// of Diablo). The client's own units are what it draws its overlays for. Game thread.
+void FirstPerson::captureStates()
+{
+	m_unit_states_scratch.clear();
+	if (!m_frame_active || isVerNot(V_113c))
+		return;
+
+	static const uintptr_t client = (uintptr_t)GetModuleHandleA("D2Client.dll");
+	static const uintptr_t common = (uintptr_t)GetModuleHandleA("D2Common.dll");
+	if (!client || !common)
+		return;
+	// D2Common: the data tables; +0xC4 = how many states states.txt has
+	const uintptr_t tables = *(const uintptr_t*)(common + 0x99E1C);
+	if (!tables)
+		return;
+	const uint32_t words = glm::min((*(const uint32_t*)(tables + 0xC4) + 31) / 32, 8u);
+
+	// D2Client: the units the game is showing (the player among them), 128 buckets per unit type,
+	// each a chain through unit +0xE4. The table at +0x109A08 beside it holds the client's own
+	// helpers (no players, no monsters).
+	const uintptr_t* table = (const uintptr_t*)(client + 0x10A608);
+	for (uint32_t type = 0; type < 2; type++) {
+		for (uint32_t bucket = 0; bucket < 128; bucket++) {
+			uint32_t guard = 0;
+			for (uintptr_t unit = table[type * 128 + bucket]; unit && guard < 512; unit = *(const uintptr_t*)(unit + 0xE4), guard++) {
+				UnitStates entry = {};
+				entry.key = (type << 24) | (*(const uint32_t*)(unit + 0x0C) & 0x00FFFFFF);
+				entry.mode = (uint16_t)*(const uint32_t*)(unit + 0x10);
+				entry.frame = *(const uint32_t*)(unit + 0x44);
+				entry.skill = 0xFFFF;
+				// unit +0x5C: stat list; its +0x10 sign bit marks the extended kind, whose +0x58 points
+				// at the state bits (bit n & 31 of dword n >> 5), as D2Common's GetUnitState reads them
+				if (const uintptr_t stats = *(const uintptr_t*)(unit + 0x5C)) {
+					if (*(const int32_t*)(stats + 0x10) < 0) {
+						if (const uint32_t* flags = *(const uint32_t* const*)(stats + 0x58)) {
+							for (uint32_t w = 0; w < words; w++)
+								entry.bits[w] = flags[w];
+						}
+					}
+				}
+				// unit +0xA8: skill list; +0x10 the skill being used, whose first dword is its skills.txt record (u16 id first)
+				if (const uintptr_t skills = *(const uintptr_t*)(unit + 0xA8)) {
+					if (const uintptr_t used = *(const uintptr_t*)(skills + 0x10)) {
+						if (const uintptr_t record = *(const uintptr_t*)used)
+							entry.skill = *(const uint16_t*)record;
+					}
+				}
+				m_unit_states_scratch.push_back(entry);
+			}
+		}
+	}
+}
+
+// Follows each unit's states from frame to frame: a state that comes on plays its cast overlay once
+// (a curse landing, an aura starting), one that goes off its remove overlay, and a skill used plays
+// the skill's own cast overlay (the flames of Fire Ball, the bolt of Chain Lightning). Render thread.
+void FirstPerson::trackOverlays(double now)
+{
+	SpriteStore& store = SpriteStore::Instance();
+	const bool ready = store.overlaysReady();
+	for (const UnitStates& s : m_unit_states_render) {
+		auto found = m_overlay_tracks.find(s.key);
+		const bool fresh = found == m_overlay_tracks.end();
+		OverlayTrack& track = fresh ? m_overlay_tracks[s.key] : found->second;
+		if (!fresh && ready) {
+			for (uint32_t w = 0; w < 8; w++) {
+				const uint32_t changed = s.bits[w] ^ track.bits[w];
+				for (uint32_t b = 0; changed && b < 32; b++) {
+					if (!((changed >> b) & 1))
+						continue;
+					const StateInfo* state = store.state(w * 32 + b);
+					const OverlayInfo* once = !state ? nullptr : ((s.bits[w] >> b) & 1) ? state->cast : state->remove;
+					if (once)
+						track.shots.push_back({ once, now });
+				}
+			}
+			const bool player = (s.key >> 24) == 0;
+			if (s.skill != 0xFFFF && skillMode(player, s.mode) && (s.mode != track.mode || s.skill != track.skill || s.frame < track.frame))
+				if (const OverlayInfo* cast = store.skillCast(s.skill))
+					track.shots.push_back({ cast, now });
+		}
+		memcpy(track.bits, s.bits, sizeof(track.bits));
+		track.mode = s.mode;
+		track.skill = s.skill;
+		track.frame = s.frame;
+		track.seen = now;
+	}
+	// a unit the client no longer has is forgotten; a one-off overlay never outlives a few seconds
+	for (auto it = m_overlay_tracks.begin(); it != m_overlay_tracks.end();) {
+		if (now - it->second.seen > 1.0) {
+			it = m_overlay_tracks.erase(it);
+			continue;
+		}
+		auto& shots = it->second.shots;
+		shots.erase(std::remove_if(shots.begin(), shots.end(), [now](const OverlayShot& shot) { return now - shot.start > 4.0; }), shots.end());
+		++it;
+	}
 }
 
 void FirstPerson::notice(const char* text)
@@ -1920,7 +2054,9 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			for (const auto& unit : m_pred_units)
 				m_pred_lookup[unit.type_id] = { unit.x, unit.y };
 		}
+		m_unit_states_render = m_unit_states;
 	}
+	trackOverlays(now);
 	if (!smooth) {
 		const glm::vec2 predicted = m_cam_sample + m_cam_velocity * glm::min((float)(now - m_cam_sample_time), 0.05f);
 		const float blend = 1.0f - expf(-(float)(now - m_cam_last_time) / 0.035f);
@@ -2151,6 +2287,92 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		item.second.clear();
 	const int act = glm::clamp(meta->act + 1, 1, 5);
 
+	// One overlay picture on a unit standing at (ux, uz). A ring the game paints on the ground lies
+	// flat around the feet; anything else stands up like the unit, just in front of it, or just behind
+	// it when the game draws it first. `age` is seconds into its animation; a one-off (`once`) ends
+	// after its last frame, a lasting one loops. Returns false once a one-off is over.
+	// `ground_only`: only a picture that lies on the ground is drawn (the player's own: the unit is the camera).
+	const auto pushOverlay = [&](const OverlayInfo& info, double age, bool once, float ux, float uz, int height_class, float strength,
+								 bool ground_only, const Sprite** shown) -> bool {
+		const Sprite* sheet = nullptr;
+		if (store.get("overlay", info.token, "NU", act, &sheet) != SpriteState::Ready)
+			return !once || age < 1.0; // a one-off that is late to arrive is let go
+		if (shown)
+			*shown = sheet;
+		const float cycle = (float)sheet->frames / info.fps;
+		float t = (float)age;
+		if (once) {
+			if (t >= cycle)
+				return false;
+		} else {
+			t = fmodf(t, cycle + info.loop_wait);
+			if (t >= cycle)
+				return true; // resting between loops
+		}
+		const int frame = glm::clamp((int)(t * info.fps), 0, sheet->frames - 1);
+		const SpriteCell& cell = sheet->cell(0, frame);
+		const float raise = -(info.yoff + (height_class >= 1 && height_class <= 4 ? info.height[height_class - 1] : 0.0f)); // screen pixels up
+		const float see_through[3] = { 0.25f, 0.5f, 0.75f };
+		const float shade = strength * (info.trans >= 0 && info.trans <= 2 ? see_through[info.trans] : 1.0f);
+		auto& batch = info.trans == 5 ? sprite_verts[sheet->texture] : glow_verts[sheet->texture];
+		if (sheet->bottom >= 0.3f * (sheet->top + sheet->bottom)) {
+			pushIsoGround(batch, cell, ux, uz, g_relief.ground(ux, uz) + 0.08f, info.xoff, -raise, shade);
+			return true;
+		}
+		if (ground_only)
+			return true;
+		glm::vec2 sight = { ux - px, uz - pz };
+		const float len = glm::length(sight);
+		if (len < 0.3f)
+			return true;
+		sight /= len;
+		const float depth = info.pre_draw ? 0.22f : -0.22f; // behind or in front of the unit's own picture
+		const glm::vec2 right = { -sight.y, sight.x };
+		const glm::vec2 at = glm::vec2(ux, uz) + sight * depth + right * (info.xoff * SPRITE_SCALE);
+		pushBillboard(batch, cell, at.x, at.y, raise * SPRITE_SCALE, px, pz, shade);
+		return true;
+	};
+	// Every overlay a unit has this frame: its states' lasting ones and the one-offs playing on it.
+	const auto pushUnitOverlays = [&](uint32_t key, float ux, float uz, int height_class, bool own, glm::vec3* glow) {
+		if (!store.overlaysReady())
+			return;
+		auto found = m_overlay_tracks.find(key);
+		if (found == m_overlay_tracks.end() || found->second.seen != now)
+			return;
+		OverlayTrack& track = found->second;
+		const double phase = (double)(key % 89) * 0.37; // units under the same aura do not pulse in step
+		const float pulse = 0.85f + 0.15f * sinf((float)now * 2.2f);
+		for (uint32_t w = 0; w < 8; w++) {
+			for (uint32_t b = 0; track.bits[w] && b < 32; b++) {
+				if (!((track.bits[w] >> b) & 1))
+					continue;
+				const StateInfo* state = store.state(w * 32 + b);
+				if (!state)
+					continue;
+				for (const OverlayInfo* info : state->overlays) {
+					const Sprite* shown = nullptr;
+					pushOverlay(*info, now + phase, false, ux, uz, height_class, own ? 0.7f : 1.0f, own, &shown);
+					if (glow && shown)
+						*glow += shown->tint * 0.1f * pulse;
+				}
+			}
+		}
+		auto& shots = track.shots;
+		for (size_t s = 0; s < shots.size();) {
+			const Sprite* shown = nullptr;
+			const double age = now - shots[s].start;
+			if (!pushOverlay(*shots[s].info, age, true, ux, uz, height_class, own ? 0.8f : 1.0f, own, &shown)) {
+				shots.erase(shots.begin() + s);
+				continue;
+			}
+			if (glow && shown) {
+				const float cycle = (float)shown->frames / shots[s].info->fps;
+				*glow += shown->tint * 0.25f * glm::clamp(1.0f - (float)age / glm::max(cycle, 0.1f), 0.0f, 1.0f);
+			}
+			s++;
+		}
+	};
+
 	for (uint32_t i = 0; i < unit_count; i++) {
 		const UnitRecord& u = units[i];
 		const glm::vec2 upos = unitPos(u);
@@ -2282,6 +2504,11 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 				drawn = true;
 			} break;
 		}
+		// auras, curses, shouts and cast flashes on characters and monsters
+		if (u.type == 0 || u.type == 1) {
+			const MonsterInfo* info = u.type == 1 ? store.monster(u.txt) : nullptr;
+			pushUnitOverlays(((uint32_t)u.type << 24) | (u.id & 0x00FFFFFF), ux, uz, info ? info->overlay_height : 2, false, nullptr);
+		}
 		if (drawn || state == SpriteState::Loading || dead)
 			continue; // drawn, about to be, or a corpse with no art (no box for those)
 
@@ -2312,6 +2539,13 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			color = glm::min(color * 1.25f + glm::vec3(0.18f), glm::vec3(1.0f));
 		pushBox(unit_verts, ux - half, uz - half, ux + half, uz + half, base, base + height, color);
 	}
+
+	// The player's own overlays: the character is the camera and is never drawn. What its aura or
+	// shout paints on the ground lies around the camera's feet (seen when looking down), and every
+	// overlay on it tints the edges of the view in its own colour: softly while it lasts, brighter
+	// for a moment as it starts or as a skill is cast.
+	glm::vec3 own_glow = { 0.0f, 0.0f, 0.0f };
+	pushUnitOverlays(player->id & 0x00FFFFFF, px, pz, 2, true, &own_glow);
 
 	// ---- draw into our own target (it has a depth buffer; the game framebuffer does not) ----
 	glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
@@ -2414,6 +2648,32 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		glUseProgram(m_program);
 		glBindVertexArray(m_vao_units);
 		glBindBuffer(GL_ARRAY_BUFFER, m_vbo_units);
+	}
+
+	// ---- the player's own auras and spells: a glow at the edges of the view ----
+	own_glow = glm::min(own_glow, glm::vec3(0.3f));
+	if (own_glow.r + own_glow.g + own_glow.b > 0.004f) {
+		static std::vector<FpVertex> glow_quad;
+		glow_quad.clear();
+		pushQuad(glow_quad, { -1.0f, -1.0f, 0.0f }, { 1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f, 0.0f }, { -1.0f, 1.0f, 0.0f }, own_glow, 1.0f);
+		GLint blend_src_rgb = GL_ONE, blend_dst_rgb = GL_ZERO, blend_src_alpha = GL_ONE, blend_dst_alpha = GL_ZERO;
+		glGetIntegerv(GL_BLEND_SRC_RGB, &blend_src_rgb);
+		glGetIntegerv(GL_BLEND_DST_RGB, &blend_dst_rgb);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &blend_src_alpha);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &blend_dst_alpha);
+		const glm::mat4 identity(1.0f);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+		glUniformMatrix4fv(m_u_mvp, 1, GL_FALSE, &identity[0][0]);
+		glUniform1f(m_u_flat, 3.0f);
+		glBufferData(GL_ARRAY_BUFFER, glow_quad.size() * sizeof(FpVertex), glow_quad.data(), GL_STREAM_DRAW);
+		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)glow_quad.size());
+		glUniform1f(m_u_flat, 0.0f);
+		glUniformMatrix4fv(m_u_mvp, 1, GL_FALSE, &mvp[0][0]);
+		glDisable(GL_BLEND);
+		glBlendFuncSeparate(blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha); // the wrapper caches its blend state
+		glEnable(GL_DEPTH_TEST);
 	}
 
 	// ---- the names of what lies on the ground ----

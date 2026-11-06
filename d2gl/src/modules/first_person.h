@@ -23,6 +23,8 @@
 
 namespace d2gl::modules {
 
+struct OverlayInfo;
+
 // Replaces the isometric world layer with a 3D first-person view built from the game state that
 // sod.dll publishes (Local\SoD_State_v1). The automap, HUD, panels and cursor are untouched: the
 // game draws them after the world stage, on top of whatever this module rendered.
@@ -126,6 +128,31 @@ class FirstPerson {
 	std::vector<MotionPrediction::PredictedUnit> m_pred_units;        // guarded by m_pred_lock
 	std::vector<MotionPrediction::PredictedUnit> m_pred_units_scratch; // game thread only
 	std::unordered_map<uint32_t, glm::vec2> m_pred_lookup;             // render thread only
+
+	// ---- overlays (auras, curses, shouts, cast flashes): what the game client has on each unit ----
+	struct UnitStates {
+		uint32_t key;     // unit type << 24 | unit id, as MotionPrediction keys units
+		uint32_t bits[8]; // states 0..255 that are on
+		uint16_t mode, skill; // animation mode; the skill in use (0xFFFF none)
+		uint32_t frame;   // animation frame: falls back when the same mode starts over
+	};
+	std::vector<UnitStates> m_unit_states;         // guarded by m_pred_lock
+	std::vector<UnitStates> m_unit_states_scratch; // game thread only
+	std::vector<UnitStates> m_unit_states_render;  // render thread only
+	struct OverlayShot {
+		const OverlayInfo* info;
+		double start;
+	};
+	struct OverlayTrack {
+		uint32_t bits[8];
+		uint16_t mode, skill;
+		uint32_t frame;
+		double seen;
+		std::vector<OverlayShot> shots; // played once: a state starting or ending, a skill used
+	};
+	std::unordered_map<uint32_t, OverlayTrack> m_overlay_tracks; // render thread
+	void captureStates();
+	void trackOverlays(double now);
 
 	// ---- camera position smoothing (render thread): the game moves units 25 times a second ----
 	bool m_cam_valid = false;
