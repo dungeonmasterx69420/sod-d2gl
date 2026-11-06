@@ -145,9 +145,19 @@ bool SpriteStore::loadIndexes()
 		const uint32_t txt = (uint32_t)atoi(item.key().c_str());
 		if (txt > 100000)
 			continue;
-		if (m_monster_tokens.size() <= txt)
-			m_monster_tokens.resize(txt + 1);
-		m_monster_tokens[txt] = item.value().value("code", std::string());
+		if (m_monsters.size() <= txt)
+			m_monsters.resize(txt + 1);
+		const auto& row = item.value();
+		MonsterInfo& info = m_monsters[txt];
+		info.token = row.value("code", std::string());
+		info.hidden = row.value("hidden", false);
+		info.ally = row.value("ally", false);
+		if (row.contains("sprite") && row["sprite"].is_object()) {
+			const auto& as = row["sprite"];
+			info.kind = as.value("kind", std::string("monster"));
+			info.token = as.value("token", info.token);
+			info.shade = as.value("shade", 1.0f);
+		}
 	}
 
 	for (const auto& item : objects["objects"].items()) {
@@ -234,7 +244,7 @@ void SpriteStore::workerMain()
 {
 	// the lookup tables come first; without them nothing can be asked for
 	while (!loadIndexes()) {
-		m_monster_tokens.clear();
+		m_monsters.clear();
 		m_objects.clear();
 		m_missiles.clear();
 		m_item_flippies.clear();
@@ -361,11 +371,11 @@ SpriteState SpriteStore::get(const char* kind, const std::string& token, const c
 	return now - entry.first_asked > LATE_MS ? SpriteState::Late : SpriteState::Loading;
 }
 
-const std::string* SpriteStore::monsterToken(uint32_t txt) const
+const MonsterInfo* SpriteStore::monster(uint32_t txt) const
 {
-	if (!m_index_ready || txt >= m_monster_tokens.size() || m_monster_tokens[txt].empty())
+	if (!m_index_ready || txt >= m_monsters.size() || m_monsters[txt].token.empty())
 		return nullptr;
-	return &m_monster_tokens[txt];
+	return &m_monsters[txt];
 }
 
 const ObjectInfo* SpriteStore::object(uint32_t txt) const

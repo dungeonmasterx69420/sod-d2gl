@@ -43,6 +43,13 @@ public:
 	struct Rect {
 		int x, y, w, h; // subtiles
 	};
+	// The floor pictures lying on one tile, lowest first: where each is in the atlas (pixels).
+	struct TileFloors {
+		int count = 0;
+		int page[3] = { 0, 0, 0 };
+		float u[3] = { 0, 0, 0 }, v[3] = { 0, 0, 0 };
+		bool liquid = false; // water, lava: it stops the character and is not a thing standing there
+	};
 
 private:
 	static const int PAGE = 2048;   // atlas page size, pixels
@@ -54,6 +61,7 @@ private:
 		int kind = 0;       // 0 floor, 1 wall across x (stands on a line of constant y), 2 wall across y, 3 upright, 4 roof
 		int roof = 0;       // roof: how high it lies, pixels
 		float avg[3] = { 0, 0, 0 }; // floor: the picture's average colour, 0..1
+		bool liquid = false;        // floor: water or lava
 		int page = 0;
 		int x = 0, y = 0, w = 0, h = 0; // rectangle in the page
 		int left = 0;       // the picture's first column, in tile pixels (0..159); upright: from the tile's middle
@@ -102,6 +110,7 @@ private:
 	std::vector<Upright> m_uprights;
 	std::vector<Rect> m_rects;
 	std::unordered_set<uint32_t> m_standing; // tiles with a wall, a tree or a roof of the game's own
+	std::unordered_map<uint32_t, TileFloors> m_floors; // by tile
 	glm::vec3 m_ground = { -1.0f, 0.0f, 0.0f }; // the average colour of the floors here; r < 0 = none
 	uint32_t m_version = 0;
 	bool m_reset_textures = false;
@@ -114,6 +123,7 @@ private:
 	std::vector<Upright> m_gl_uprights;
 	std::vector<Rect> m_gl_rects;
 	std::unordered_set<uint32_t> m_gl_standing;
+	std::unordered_map<uint32_t, TileFloors> m_gl_floors;
 	glm::vec3 m_gl_ground = { -1.0f, 0.0f, 0.0f };
 	std::vector<Vertex> m_scratch;
 
@@ -146,6 +156,16 @@ public:
 	// has not, what blocks the way is painted into the floor (the rock of a cave), and the caller
 	// builds the wall from the collision map.
 	bool standing(int tx, int ty) const { return m_gl_standing.count(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)) != 0; }
+	// The floor pictures on a tile, for a caller that raises part of the floor (a forge, a heap of
+	// rubble: things the game paints into the floor and then keeps the character off). Null when
+	// the tile has none.
+	const TileFloors* floors(int tx, int ty) const
+	{
+		const auto it = m_gl_floors.find(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF));
+		return it == m_gl_floors.end() ? nullptr : &it->second;
+	}
+	GLuint texture(int page) const { return page >= 0 && page < MAX_PAGES ? m_textures[page] : 0; }
+	static float pageSize() { return (float)PAGE; }
 	// The colour of the ground in the rooms drawn here, for what the caller builds beside them
 	// without art of its own (a cliff at the edge of a desert). False when there is none.
 	bool ground(glm::vec3* color) const

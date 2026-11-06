@@ -288,6 +288,18 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 			for (int k = 0; k < 3 && count; k++)
 				art.avg[k] = (float)sum[k] / (float)count / 255.0f;
 		}
+		{
+			// Water and lava stop the character too, but nothing stands there. Told by the file's
+			// name, or by a picture that is plainly blue.
+			char lower[160];
+			for (int i = 0; i < 160; i++)
+				lower[i] = (char)tolower((unsigned char)name[i]);
+			lower[159] = 0;
+			static const char* liquids[] = { "river", "water", "lava", "swamp", "ocean", "coast", "shore", "moat" };
+			for (const char* word : liquids)
+				art.liquid = art.liquid || strstr(lower, word) != nullptr;
+			art.liquid = art.liquid || (art.avg[2] > art.avg[0] * 1.3f && art.avg[2] > art.avg[1] * 1.08f);
+		}
 		if (art.kind == 0 && filled > TILE_W * TILE_H / 2 * 9 / 10) {
 			for (int y = 0; y < h; y++) {
 				uint32_t* row = &out[(size_t)y * w];
@@ -411,6 +423,7 @@ void TileWorld::clearScene()
 	m_uprights.clear();
 	m_rects.clear();
 	m_standing.clear();
+	m_floors.clear();
 	m_signature = 0;
 	m_version++;
 }
@@ -539,6 +552,7 @@ void TileWorld::capture(bool active, bool inside)
 	m_uprights.clear();
 	m_rects.clear();
 	m_standing.clear();
+	m_floors.clear();
 	const auto stands = [&](int tx, int ty) { m_standing.insert(((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)); };
 	glm::vec3 ground_sum = { 0.0f, 0.0f, 0.0f };
 	int ground_count = 0;
@@ -607,6 +621,14 @@ void TileWorld::capture(bool active, bool inside)
 						{ (u0 + 80.0f) / page_size, (v0 + 79.25f) / page_size }, { (u0 + 0.75f) / page_size, (v0 + 40.0f) / page_size } };
 					pushQuad(m_flat[art.page], p, uv, 200);
 					floors++;
+					TileFloors& on_tile = m_floors[((uint32_t)tx & 0xFFFF) << 16 | ((uint32_t)ty & 0xFFFF)];
+					if (on_tile.count < 3) {
+						on_tile.page[on_tile.count] = art.page;
+						on_tile.u[on_tile.count] = u0;
+						on_tile.v[on_tile.count] = v0;
+						on_tile.count++;
+					}
+					on_tile.liquid = on_tile.liquid || art.liquid;
 					if (layer == 0) {
 						ground_sum += glm::vec3(art.avg[0], art.avg[1], art.avg[2]);
 						ground_count++;
@@ -813,6 +835,7 @@ void TileWorld::sync()
 	m_gl_uprights = m_uprights;
 	m_gl_rects = m_rects;
 	m_gl_standing = m_standing;
+	m_gl_floors = m_floors;
 	m_gl_ground = m_ground;
 	m_gl_version = m_version;
 	trace_log("FirstPerson: map tiles rebuilt (%u rooms, %u vertices, %u uprights, %u atlas pages).", (uint32_t)m_gl_rects.size(), (uint32_t)m_scratch.size(), (uint32_t)m_gl_uprights.size(), (uint32_t)m_pages.size());

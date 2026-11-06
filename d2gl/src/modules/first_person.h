@@ -67,7 +67,14 @@ class FirstPerson {
 	bool m_lmb = false, m_rmb = false;
 	DWORD m_lmb_time = 0, m_rmb_time = 0;
 	bool m_moving = false;
-	bool m_key_f9 = false, m_key_f10 = false;
+	bool m_sliding = false;                  // blocked in front: going along the wall
+	glm::vec2 m_line_from = { 0.0f, 0.0f }; // the line the character is being walked along
+	glm::vec2 m_line_dir = { 1.0f, 0.0f };
+	glm::vec2 m_aim_trim = { 0.0f, 0.0f };  // standing correction to where clicks are aimed, subtiles
+	bool m_way_clear = false;                // last frame the pointer reached its full distance
+	DWORD m_steer_tick = 0;
+	bool m_key_f9 = false;
+	bool m_f10_pressed = false; // F10 went down since the last frame (window procedure sets, update takes)
 	HANDLE m_cmd_map = nullptr;
 	uint8_t* m_cmd = nullptr;
 	DWORD m_next_cmd_try = 0;
@@ -142,7 +149,8 @@ class FirstPerson {
 	void writeMove(float x, float y);
 	void pushRecord(uint32_t opcode, uint32_t a0, uint32_t a1, float x, float y, uint32_t a2);
 	void fire(uint32_t hand);
-	float steerReach(float dir_x, float dir_y);
+	float steerReach(float dir_x, float dir_y, float reach);
+	void steer(glm::vec2 dir);
 	bool readFrame();
 	bool readRooms(uint32_t* epoch);
 	bool initGL();

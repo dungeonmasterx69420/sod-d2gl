@@ -64,6 +64,14 @@ struct ObjectInfo {
 	bool cycle[8] = { false };
 };
 
+struct MonsterInfo {
+	std::string token;
+	std::string kind = "monster"; // "player" for a monster drawn from a character's graphics
+	float shade = 1.0f;            // an Assassin's shadow is her own figure, dark
+	bool hidden = false;           // something the game never shows (a spawner, a vine under the ground)
+	bool ally = false;             // fights on the player's side: a summoned creature, a trap, a hireling
+};
+
 struct MissileInfo {
 	std::string cel;
 	bool additive = false;
@@ -104,7 +112,7 @@ class SpriteStore {
 
 	// lookup tables, written by the worker before m_index_ready is set and read-only afterwards
 	volatile bool m_index_ready = false;
-	std::vector<std::string> m_monster_tokens;
+	std::vector<MonsterInfo> m_monsters;
 	std::unordered_map<uint32_t, ObjectInfo> m_objects;
 	std::unordered_map<uint32_t, MissileInfo> m_missiles;
 	std::unordered_map<std::string, std::string> m_item_flippies;
@@ -131,7 +139,7 @@ public:
 	// The sheet of a graphic in a mode ("NU", "WL", ...) with an act's palette (1..5).
 	SpriteState get(const char* kind, const std::string& token, const char* mode, int act, const Sprite** sprite);
 
-	const std::string* monsterToken(uint32_t txt) const;
+	const MonsterInfo* monster(uint32_t txt) const;
 	const ObjectInfo* object(uint32_t txt) const;
 	const MissileInfo* missile(uint32_t txt) const;
 	const std::string* itemFlippy(const std::string& code) const;

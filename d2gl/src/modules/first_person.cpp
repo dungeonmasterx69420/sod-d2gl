@@ -171,6 +171,7 @@ inline Cell classify(uint16_t c)
 // world units are subtiles; x = game x, z = game y, y = up
 const float WALL_HEIGHT = 7.0f;
 const float LOW_HEIGHT = 1.6f;
+const float RELIEF_HEIGHT = 1.3f; // a thing painted into the floor that the character cannot walk on
 const float EYE_HEIGHT = 3.2f;
 const float FOG_FAR = 90.0f;
 
@@ -774,10 +775,104 @@ void FirstPerson::fire(uint32_t hand)
 	pushRecord(OP_CAST_AT, hand, 0, m_player_x + cosf(yaw) * reach, m_player_y + sinf(yaw) * reach, 0);
 }
 
-// How far ahead the game's pointer may be held while walking in a direction, as a fraction of the
-// full steering distance. The game treats a press on a unit as "talk to / attack / pick up", so
-// the pointer is kept off every unit's sprite.
-float FirstPerson::steerReach(float dir_x, float dir_y)
+// ---- what blocks the way, read from the game's own collision map (game thread) ----
+namespace {
+
+const float STEER_DISTANCE = 12.0f; // sod.dll's steer_distance: a move vector of length 1 puts the pointer this far ahead
+const uint16_t C_STOPS_PLAYER = 0x0001 | 0x0008 | 0x0400 | 0x0800; // no walking, no players, an object, a closed door
+
+struct SteerRoom {
+	int x, y, w, h;
+	uint32_t cells;
+};
+std::vector<SteerRoom> g_steer_rooms;
+DWORD g_steer_rooms_tick = 0;
+
+bool peek(void* dst, uint32_t src, size_t size)
+{
+	if (src < 0x10000)
+		return false;
+	__try {
+		memcpy(dst, (const void*)(uintptr_t)src, size);
+		return true;
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+// The character's own place, to a fraction of a subtile.
+bool playerPlace(glm::vec2* pos)
+{
+	const uint32_t player = (uint32_t)(uintptr_t)d2::getPlayerUnit();
+	uint32_t path = 0, xy[2] = { 0, 0 };
+	if (!player || !peek(&path, player + 0x2C, 4) || !peek(xy, path, 8))
+		return false;
+	*pos = { (float)xy[0] / 65536.0f, (float)xy[1] / 65536.0f };
+	return true;
+}
+
+void addSteerRoom(uint32_t ptr)
+{
+	uint32_t coll = 0, map[10];
+	if (!ptr || !peek(&coll, ptr + 0x20, 4) || !peek(map, coll, sizeof(map)))
+		return;
+	if (!map[2] || map[2] > 512 || !map[3] || map[3] > 512 || !map[8])
+		return;
+	for (const auto& known : g_steer_rooms)
+		if (known.cells == map[8])
+			return;
+	g_steer_rooms.push_back({ (int)map[0], (int)map[1], (int)map[2], (int)map[3], map[8] });
+}
+
+// The collision maps of the character's room and the rooms around it.
+void steerRooms()
+{
+	const DWORD now = GetTickCount();
+	if (!g_steer_rooms.empty() && now - g_steer_rooms_tick < 100)
+		return;
+	g_steer_rooms_tick = now;
+	g_steer_rooms.clear();
+
+	const uint32_t player = (uint32_t)(uintptr_t)d2::getPlayerUnit();
+	uint32_t path = 0, room = 0, list = 0, count = 0, around[64];
+	if (!player || !peek(&path, player + 0x2C, 4) || !peek(&room, path + 0x1C, 4) || !room)
+		return;
+	addSteerRoom(room);
+	if (peek(&list, room, 4) && peek(&count, room + 0x24, 4) && count && count <= 64 && peek(around, list, count * 4))
+		for (uint32_t i = 0; i < count; i++)
+			addSteerRoom(around[i]);
+}
+
+// True when the character cannot stand on this subtile. What is not loaded counts as blocked.
+bool stopsPlayer(int x, int y)
+{
+	for (const auto& room : g_steer_rooms)
+		if (x >= room.x && y >= room.y && x < room.x + room.w && y < room.y + room.h) {
+			uint16_t cell = 0;
+			if (!peek(&cell, room.cells + (uint32_t)((y - room.y) * room.w + (x - room.x)) * 2, 2))
+				return true;
+			return (cell & C_STOPS_PLAYER) != 0;
+		}
+	return true;
+}
+
+// How far the way is clear from `from` towards `dir`, up to `max`.
+float clearAhead(glm::vec2 from, glm::vec2 dir, float max)
+{
+	for (float d = 0.75f; d <= max; d += 0.25f) {
+		const glm::vec2 p = from + dir * d;
+		if (stopsPlayer((int)floorf(p.x), (int)floorf(p.y)))
+			return d - 0.25f;
+	}
+	return max;
+}
+
+}
+
+// How far ahead the game's pointer may be held while walking in a direction: `reach` subtiles, or
+// less. The game treats a press on a unit as "talk to / attack / pick up", so the pointer is kept
+// off every unit's sprite.
+float FirstPerson::steerReach(float dir_x, float dir_y, float reach)
 {
 	const auto hdr = (const StateHeader*)m_base;
 	const uint32_t size = sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
@@ -793,22 +888,31 @@ float FirstPerson::steerReach(float dir_x, float dir_y)
 	}
 	const auto meta = (const FrameMeta*)m_input_copy.data();
 	if (!ok || meta->valid != 1)
-		return 1.0f;
+		return reach;
 
 	const auto player = (const PlayerRecord*)(m_input_copy.data() + sizeof(FrameMeta));
 	const auto units = (const UnitRecord*)(m_input_copy.data() + sizeof(FrameMeta) + sizeof(PlayerRecord));
 	const float px = (float)player->px / 65536.0f, py = (float)player->py / 65536.0f;
 	const uint32_t count = glm::min((uint32_t)meta->unitCount, hdr->maxUnits);
 
-	const float STEER_DISTANCE = 4.0f; // sod.dll's steer_distance default
-	const float candidates[] = { 1.0f, 0.7f, 1.4f, 0.45f, 1.8f };
-	for (const float reach : candidates) {
-		const float tx = px + dir_x * STEER_DISTANCE * reach, ty = py + dir_y * STEER_DISTANCE * reach;
+	const float candidates[] = { reach, reach * 0.75f, reach * 0.55f, reach * 0.35f, 1.8f, 1.2f };
+	for (const float candidate : candidates) {
+		if (candidate > reach)
+			continue;
+		const float tx = px + dir_x * candidate, ty = py + dir_y * candidate;
 		bool blocked = false;
 		for (uint32_t i = 0; i < count && !blocked; i++) {
 			const UnitRecord& u = units[i];
 			if (u.type == 3 || (u.type == 1 && (u.mode == 0 || u.mode == 12)))
 				continue;
+			// The player's own creatures run alongside, and a click on one only walks up to it.
+			// Counted as in the way, a Shadow kept the pointer within a step or two of the
+			// character, where a direction can only be named to the nearest 15 degrees or so.
+			if (u.type == 1) {
+				const MonsterInfo* info = SpriteStore::Instance().monster(u.txt);
+				if (info && (info->ally || info->hidden))
+					continue;
+			}
 			const bool dynamic = u.type == 0 || u.type == 1;
 			const float ux = dynamic ? (float)u.px / 65536.0f : (float)u.px + 0.5f;
 			const float uy = dynamic ? (float)u.py / 65536.0f : (float)u.py + 0.5f;
@@ -818,9 +922,104 @@ float FirstPerson::steerReach(float dir_x, float dir_y)
 			blocked = fabsf(sx) < 56.0f && sy > -112.0f && sy < 30.0f;
 		}
 		if (!blocked)
-			return reach;
+			return candidate;
 	}
-	return 0.45f;
+	return glm::min(reach, 1.2f);
+}
+
+// Walks the character the way `dir` points (game thread, once a frame while a move key is down).
+//
+// The game moves a character by clicks, and takes a click as a whole subtile. Two things follow.
+// A click close by cannot name a direction well: 4 subtiles out, the nearest whole subtile is up
+// to 7 degrees off. And each new click is measured from wherever the character has got to, so the
+// errors add up to a path that wanders. So the pointer is held far ahead, and it is held on one
+// line: the line through the place where this direction was first taken. A character that has
+// drifted off the line is steered back to it.
+//
+// The pointer never goes through a wall. The game would find a way round, and the character
+// would run off sideways to get there. It stops short of what blocks the way, and when the way is
+// blocked right in front, the character slides along the wall instead, the way a first-person
+// game does. Walls in the game's world run along x and y, so that is where sliding goes.
+void FirstPerson::steer(glm::vec2 dir)
+{
+	glm::vec2 pos;
+	if (!playerPlace(&pos)) {
+		const float reach = steerReach(dir.x, dir.y, 4.0f);
+		writeMove(dir.x * reach / STEER_DISTANCE, dir.y * reach / STEER_DISTANCE);
+		m_moving = true;
+		m_move_x = dir.x;
+		m_move_y = dir.y;
+		return;
+	}
+	steerRooms();
+
+	// the line: started anew when the direction turns by a degree, or the character is far off it
+	const glm::vec2 off = pos - m_line_from;
+	const float along = glm::dot(off, m_line_dir);
+	const float aside = glm::length(off - m_line_dir * along);
+	if (!m_moving || m_sliding || glm::dot(dir, m_line_dir) < 0.99985f || aside > 2.5f || along < -1.0f) {
+		m_line_from = pos;
+		m_line_dir = dir;
+	}
+	const glm::vec2 foot = m_line_from + m_line_dir * glm::max(glm::dot(pos - m_line_from, m_line_dir), 0.0f);
+
+	// Where the game takes a click is not quite where it was aimed: measured, the subtile it
+	// walks to lies a fraction of a subtile off, always the same way on screen. Left alone, that
+	// bends every walk by a few degrees, more in some directions than in others. So the aim is
+	// trimmed by how far the character is off its line (twice over, to come back quickly), and
+	// what stays off is added up into a standing correction that outlasts the line: it belongs
+	// to the screen, not to the direction.
+	const glm::vec2 across = { -m_line_dir.y, m_line_dir.x };
+	const float astray = glm::dot(pos - m_line_from, across);
+	const DWORD tick = GetTickCount();
+	const float dt = m_steer_tick ? glm::min((float)(tick - m_steer_tick) / 1000.0f, 0.1f) : 0.0f;
+	m_steer_tick = tick;
+	if (m_moving && !m_sliding && m_way_clear && fabsf(astray) < 1.5f) {
+		m_aim_trim += across * (astray * 4.0f * dt);
+		const float trim = glm::length(m_aim_trim);
+		if (trim > 1.5f)
+			m_aim_trim *= 1.5f / trim;
+	}
+	const glm::vec2 to = foot + m_line_dir * STEER_DISTANCE - across * (astray * 2.0f) - m_aim_trim - pos;
+	const float want = glm::min(glm::length(to), STEER_DISTANCE);
+	glm::vec2 go = glm::normalize(to);
+
+	float clear = clearAhead(pos, go, want);
+	m_way_clear = clear >= want - 0.5f; // nothing in the way: being off the line is the click's doing, not a wall's
+	m_sliding = false;
+	if (clear < 1.75f) {
+		// blocked right in front: along the wall, whichever way the keys lean more
+		const glm::vec2 sides[2] = { { dir.x > 0.0f ? 1.0f : -1.0f, 0.0f }, { 0.0f, dir.y > 0.0f ? 1.0f : -1.0f } };
+		const float lean[2] = { fabsf(dir.x), fabsf(dir.y) };
+		int pick = -1;
+		float pick_clear = 0.0f;
+		for (int i = 0; i < 2; i++) {
+			if (lean[i] < 0.2f)
+				continue; // straight at the wall: stand, do not pick a side for the player
+			const float side_clear = clearAhead(pos, sides[i], 6.0f);
+			if (side_clear >= 1.75f && (pick < 0 || lean[i] > lean[pick])) {
+				pick = i;
+				pick_clear = side_clear;
+			}
+		}
+		if (pick < 0) {
+			// nowhere to go: stand at the wall, and keep the camera from leaning into it
+			if (m_moving)
+				writeMove(0.0f, 0.0f);
+			m_moving = false;
+			m_move_x = m_move_y = 0.0f;
+			return;
+		}
+		go = sides[pick];
+		clear = pick_clear;
+		m_sliding = true;
+	}
+
+	const float reach = steerReach(go.x, go.y, glm::max(clear - 0.5f, 1.0f));
+	writeMove(go.x * reach / STEER_DISTANCE, go.y * reach / STEER_DISTANCE);
+	m_moving = true;
+	m_move_x = go.x;
+	m_move_y = go.y;
 }
 
 void FirstPerson::capturePositions()
@@ -879,12 +1078,10 @@ void FirstPerson::update(bool active)
 	m_frame_active = active;
 	const bool foreground = isForeground();
 
-	// F9: first person on / off.  F10: free the cursor without leaving first person.
-	const bool f9 = foreground && keyDown(VK_F9), f10 = foreground && keyDown(VK_F10);
+	// F9: first person on / off.  (F10, the cursor, is further down: it needs to know about panels.)
+	const bool f9 = foreground && keyDown(VK_F9);
 	if (f9 && !m_key_f9)
 		toggle();
-	if (f10 && !m_key_f10)
-		m_look_free = !m_look_free;
 	// The rest take Ctrl: F1 to F8 on their own are the game's skill keys.
 	//   Ctrl+F5 / Ctrl+F6: narrower / wider field of view.
 	//   Ctrl+F7: the game's own map tiles off / on.  Ctrl+F8: write a trace of the next frame.
@@ -920,7 +1117,6 @@ void FirstPerson::update(bool active)
 		m_trace_armed = true; // trace the next frame
 	m_key_f8 = f8;
 	m_key_f9 = f9;
-	m_key_f10 = f10;
 
 	if (!m_raw_registered && App.hwnd) {
 		RAWINPUTDEVICE device = { 0x01, 0x02, 0, App.hwnd }; // generic desktop / mouse
@@ -937,10 +1133,35 @@ void FirstPerson::update(bool active)
 		// Not 0x10 and 0x11: those are the buttons the game flashes for new stat points and a
 		// changed quest log, not panels. With them here, the mouse stopped turning the view on
 		// entering the Den of Evil, where the quest log button comes up.
-		static const uint8_t panels[] = { 0x01, 0x02, 0x04, 0x05, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x13, 0x14, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x21 };
+		// Not 0x13 either: it is set for as long as a summoned creature's or a hireling's portrait
+		// is on screen. With it here, summoning a Shadow Master gave the cursor back for good.
+		static const uint8_t panels[] = { 0x01, 0x02, 0x04, 0x05, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x14, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x21 };
 		for (const uint8_t id : panels)
 			panel = panel || flags[id] != 0;
 	}
+
+	// F10 hands the cursor over and takes it back. What it does always shows: a line on screen
+	// says whose the mouse is, and stays there for as long as the cursor is free. Pressed while a
+	// panel is open it changes nothing (the panel has the cursor anyway); it used to flip the
+	// setting unseen, and closing the panel then left the player with a cursor and no way to tell
+	// why the view no longer turned.
+	const bool f10 = m_f10_pressed;
+	m_f10_pressed = false;
+	if (!active || !m_enabled) {
+		m_look_free = false; // a new game starts with the view under the mouse
+	} else if (f10) {
+		if (m_look_free) {
+			m_look_free = false;
+			notice("MOUSE LOOK");
+		} else if (!panel) {
+			m_look_free = true;
+		} else {
+			notice("CLOSE THE PANEL TO LOOK AROUND");
+		}
+	}
+	if (m_look_free && !panel)
+		notice("CURSOR FREE - F10 TO LOOK AROUND");
+
 	const bool want = m_enabled && active && foreground && !m_look_free && !panel && m_raw_registered && openCommands();
 	setLook(want);
 	if (!m_look)
@@ -951,13 +1172,7 @@ void FirstPerson::update(bool active)
 	const float strafe = (keyDown('D') ? 1.0f : 0.0f) - (keyDown('A') ? 1.0f : 0.0f);
 	if (forward != 0.0f || strafe != 0.0f) {
 		const float yaw = m_yaw, c = cosf(yaw), s = sinf(yaw);
-		const float x = forward * c - strafe * s, y = forward * s + strafe * c;
-		const float len = sqrtf(x * x + y * y);
-		const float reach = glm::min(steerReach(x / len, y / len), 1.0f);
-		writeMove(x / len * reach, y / len * reach);
-		m_moving = true;
-		m_move_x = x / len;
-		m_move_y = y / len;
+		steer(glm::normalize(glm::vec2(forward * c - strafe * s, forward * s + strafe * c)));
 	} else {
 		if (m_moving)
 			writeMove(0.0f, 0.0f);
@@ -1012,6 +1227,15 @@ bool FirstPerson::onMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 		if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
 			m_rmb = false;
 		return false; // the default handler still has to see WM_INPUT
+	}
+
+	// F10 is ours while the first-person view is up. Taken from the message, not from the key's
+	// state: a press is one message however long the key is held, and neither the game (F10 fades
+	// its automap) nor Windows (F10 opens the window menu) gets to act on it.
+	if ((msg == WM_SYSKEYDOWN || msg == WM_KEYDOWN || msg == WM_SYSKEYUP || msg == WM_KEYUP) && wParam == VK_F10 && m_frame_active) {
+		if ((msg == WM_SYSKEYDOWN || msg == WM_KEYDOWN) && !(lParam & (1 << 30)))
+			m_f10_pressed = true;
+		return true;
 	}
 
 	if (!m_look)
@@ -1209,9 +1433,11 @@ void FirstPerson::rebuildWorld()
 
 	static std::vector<FpVertex> plain;
 	static std::map<int, std::vector<FpVertex>> floor_art, wall_art; // by level
+	static std::map<int, std::vector<FpVertex>> relief_art;          // by page of the map tiles' atlas
 	plain.clear();
 	floor_art.clear();
 	wall_art.clear();
+	relief_art.clear();
 
 	const TileWorld& tile_world = TileWorld::Instance();
 
@@ -1260,6 +1486,69 @@ void FirstPerson::rebuildWorld()
 		}
 		if (touches && patch.size() <= 12)
 			spill.insert(patch.begin(), patch.end());
+	}
+
+	// The game paints many things into the floor: a forge and its anvil, a heap of rubble, a
+	// camp's litter. In its own view they look solid. Laid flat they are a picture on the ground,
+	// and the character stops at something the player cannot see. Where the character cannot
+	// walk and nothing of the game's stands (no wall, no tree), that part of the floor is raised
+	// into a block that carries the floor's own picture. Not water or lava.
+	const auto raised = [&](int gx, int gy) -> bool {
+		if (classAt(gx, gy) != CELL_LOW)
+			return false;
+		const int tx = floorDiv(gx), ty = floorDiv(gy);
+		if (tile_world.standing(tx, ty))
+			return false;
+		const TileWorld::TileFloors* on_tile = tile_world.floors(tx, ty);
+		return on_tile && on_tile->count > 0 && !on_tile->liquid;
+	};
+	const float page_size = TileWorld::pageSize();
+	for (const auto& room : rooms) {
+		if (!tile_world.covers(room.x, room.y, room.w, room.h))
+			continue;
+		for (int y = 0; y < room.h; y++)
+			for (int x = 0; x < room.w; x++) {
+				if (room.cls[y * room.w + x] != CELL_LOW)
+					continue;
+				const int gx = room.x + x, gy = room.y + y;
+				if (!raised(gx, gy))
+					continue;
+				const int tx = floorDiv(gx), ty = floorDiv(gy);
+				const TileWorld::TileFloors& on_tile = *tile_world.floors(tx, ty);
+				const float x0 = (float)gx, x1 = x0 + 1.0f, z0 = (float)gy, z1 = z0 + 1.0f;
+				const bool open[4] = { !raised(gx, gy - 1), !raised(gx + 1, gy), !raised(gx, gy + 1), !raised(gx - 1, gy) };
+				for (int layer = 0; layer < on_tile.count; layer++) {
+					// where a point of the tile is in its picture: the tile is a diamond there
+					const auto at = [&](float wx, float wz) {
+						const float fx = (wx - (float)(tx * TILE)) / TILE, fz = (wz - (float)(ty * TILE)) / TILE;
+						return glm::vec2((on_tile.u[layer] + 80.0f + (fx - fz) * 79.25f) / page_size, (on_tile.v[layer] + 0.75f + (fx + fz) * 39.25f) / page_size);
+					};
+					const float lift = RELIEF_HEIGHT + 0.004f * (float)layer, out = 0.004f * (float)layer;
+					std::vector<FpVertex>& batch = relief_art[on_tile.page[layer]];
+					const glm::vec3 top[4] = { { x0, lift, z0 }, { x1, lift, z0 }, { x1, lift, z1 }, { x0, lift, z1 } };
+					const glm::vec2 top_uv[4] = { at(x0, z0), at(x1, z0), at(x1, z1), at(x0, z1) };
+					const float lit[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+					pushQuadUV(batch, top, top_uv, lit);
+					// the sides carry the colours of the edge they hang from
+					const glm::vec2 corner[4] = { { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
+					const glm::vec2 push[4] = { { 0.0f, -out }, { out, 0.0f }, { 0.0f, out }, { -out, 0.0f } };
+					const float side_shade[4] = { 0.62f, 0.8f, 0.7f, 0.55f };
+					for (int side = 0; side < 4; side++) {
+						if (!open[side])
+							continue;
+						const glm::vec2 a = corner[side], b = corner[(side + 1) % 4];
+						// sampled a little inside the cell, so the side takes this cell's colours
+						const glm::vec2 middle = { x0 + 0.5f, z0 + 0.5f };
+						const glm::vec2 ua = at(a.x + (middle.x - a.x) * 0.2f, a.y + (middle.y - a.y) * 0.2f), ub = at(b.x + (middle.x - b.x) * 0.2f, b.y + (middle.y - b.y) * 0.2f);
+						const glm::vec3 p[4] = { { a.x + push[side].x, 0.0f, a.y + push[side].y }, { b.x + push[side].x, 0.0f, b.y + push[side].y },
+							{ b.x + push[side].x, lift, b.y + push[side].y }, { a.x + push[side].x, lift, a.y + push[side].y } };
+						const glm::vec2 uv[4] = { ua, ub, ub, ua };
+						const float s = side_shade[side];
+						const float shades[4] = { s * 0.8f, s * 0.8f, s, s };
+						pushQuadUV(batch, p, uv, shades);
+					}
+				}
+			}
 	}
 
 	for (const auto& room : rooms) {
@@ -1421,6 +1710,9 @@ void FirstPerson::rebuildWorld()
 		append(item.second, g_level_art[item.first].floor_texture);
 	for (const auto& item : wall_art)
 		append(item.second, g_level_art[item.first].wall_texture);
+	for (const auto& item : relief_art)
+		if (const GLuint texture = tile_world.texture(item.first))
+			append(item.second, texture);
 
 	glBindBuffer(GL_ARRAY_BUFFER, m_vbo_world);
 	glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(FpVertex), verts.data(), GL_STATIC_DRAW);
@@ -1755,11 +2047,13 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		bool drawn = false;
 		switch (u.type) {
 			case 1: {
-				const std::string* token = store.monsterToken(u.txt);
-				if (!token || u.mode >= 16)
+				const MonsterInfo* info = store.monster(u.txt);
+				if (!info || u.mode >= 16)
 					break;
+				if (info->hidden)
+					continue; // the game shows nothing for it either
 				const char* mode = MONSTER_MODES[u.mode];
-				state = store.get("monster", *token, mode, act, &sprite);
+				state = store.get(info->kind.c_str(), info->token, mode, act, &sprite);
 				if (state != SpriteState::Ready)
 					break;
 				int frame;
@@ -1769,7 +2063,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 					frame = spriteFrame(*sprite, 0, 0, true, now); // a substitute animation runs on its own clock
 				else
 					frame = spriteFrame(*sprite, u.gfxFrame, u.frameCount, u.mode != 0, now);
-				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, shade);
+				pushBillboard(sprite_verts[sprite->texture], sprite->cell(spriteDirection(*sprite, u.dir64, ux, uz, px, pz), frame), ux, uz, 0.0f, px, pz, shade * info->shade);
 				drawn = true;
 			} break;
 			case 2: {
@@ -1801,8 +2095,10 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			} break;
 			case 3: {
 				const MissileInfo* info = store.missile(u.txt);
-				if (!info || info->cel.empty())
+				if (!info)
 					break;
+				if (info->cel.empty())
+					continue; // a missile with no picture: the game uses those to carry an effect, unseen
 				state = store.get("missile", info->cel, "NU", act, &sprite);
 				if (state != SpriteState::Ready)
 					break;
