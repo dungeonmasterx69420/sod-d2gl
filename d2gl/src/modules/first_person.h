@@ -139,6 +139,9 @@ class FirstPerson {
 	glm::vec2 m_lead_cam = { 0.0f, 0.0f }, m_lead_body = { 0.0f, 0.0f }, m_lead_off = { 0.0f, 0.0f };
 	float m_lead_speed = 12.0f;
 	double m_lead_time = 0.0, m_lead_press = 0.0, m_lead_moved = 0.0;
+	// where the camera is, as last drawn (render thread writes; the game thread sends it as STOP_AT)
+	volatile float m_cam_spot_x = 0.0f, m_cam_spot_y = 0.0f;
+	volatile DWORD m_cam_spot_tick = 0; // when it was drawn there; 0 = never
 	std::vector<uint8_t> m_room_copy;
 
 	FirstPerson() = default;
@@ -147,6 +150,7 @@ class FirstPerson {
 	bool openCommands();
 	void setLook(bool on);
 	void writeMove(float x, float y);
+	void stopMoving();
 	void pushRecord(uint32_t opcode, uint32_t a0, uint32_t a1, float x, float y, uint32_t a2);
 	void fire(uint32_t hand);
 	float steerReach(float dir_x, float dir_y, float reach);

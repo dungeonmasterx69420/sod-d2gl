@@ -109,7 +109,8 @@ const wchar_t* CMD_NAME = L"Local\\SoD_Cmd_v2";
 const uint32_t CMD_MAGIC = 0x43446F53;
 const uint32_t CMD_VERSION = 2;
 const uint32_t CMD_FLAG_LOOK = 4;
-enum : uint32_t { OP_ATTACK_UNIT = 1, OP_CAST_AT = 2, OP_INTERACT = 3 };
+const uint32_t CMD_DLL_DIRECT = 1; // dllFlags bit0: sod.dll walks the player with the game's move calls, no pointer
+enum : uint32_t { OP_ATTACK_UNIT = 1, OP_CAST_AT = 2, OP_INTERACT = 3, OP_STOP_AT = 12 };
 
 #pragma pack(push, 1)
 struct CmdHeader {
@@ -117,7 +118,7 @@ struct CmdHeader {
 	volatile float moveX, moveY;
 	volatile uint32_t moveSeq, flags;
 	volatile LONG uiFlags;
-	volatile uint32_t dllVersion, lastError, reserved;
+	volatile uint32_t dllVersion, lastError, dllFlags;
 };
 struct CmdRecord {
 	uint32_t opcode, seq, a0, a1;
@@ -719,6 +720,25 @@ void FirstPerson::writeMove(float x, float y)
 	hdr->moveSeq = hdr->moveSeq + 1;
 }
 
+// The move keys came up (or the way is shut, or look mode ended). With sod.dll's direct movement
+// it is told where the camera is first, and walks the character there: the camera runs a little
+// ahead so it can start at once, and this way the character catches up with it instead of the
+// view sliding back to wherever the game would have stopped the character.
+void FirstPerson::stopMoving()
+{
+	if (m_moving && m_cmd) {
+		const bool direct = ((const CmdHeader*)m_cmd)->dllFlags & CMD_DLL_DIRECT;
+		const DWORD drawn = m_cam_spot_tick;
+		// a camera that is not being drawn is not where the player is (signed: the render thread's
+		// tick can be a step ahead of this thread's)
+		if (direct && drawn && (int32_t)(GetTickCount() - drawn) < 250)
+			pushRecord(OP_STOP_AT, 0, 0, m_cam_spot_x, m_cam_spot_y, 0);
+		writeMove(0.0f, 0.0f);
+	}
+	m_moving = false;
+	m_move_x = m_move_y = 0.0f;
+}
+
 void FirstPerson::pushRecord(uint32_t opcode, uint32_t a0, uint32_t a1, float x, float y, uint32_t a2)
 {
 	if (!m_cmd)
@@ -749,10 +769,7 @@ void FirstPerson::setLook(bool on)
 		hdr->flags = on ? (hdr->flags | CMD_FLAG_LOOK) : (hdr->flags & ~CMD_FLAG_LOOK);
 	}
 	if (!on) {
-		if (m_moving)
-			writeMove(0.0f, 0.0f);
-		m_moving = false;
-		m_move_x = m_move_y = 0.0f;
+		stopMoving();
 		m_lmb = m_rmb = false;
 	}
 }
@@ -928,6 +945,9 @@ float FirstPerson::steerReach(float dir_x, float dir_y, float reach)
 }
 
 // Walks the character the way `dir` points (game thread, once a frame while a move key is down).
+// sod.dll turns the vector into the game's own move calls (move=direct), or, without those, into
+// a held click with the pointer this far ahead (move=vmouse). The rest of this note is about the
+// click; a direct target is a whole subtile too, so the line and the trim help it the same way.
 //
 // The game moves a character by clicks, and takes a click as a whole subtile. Two things follow.
 // A click close by cannot name a direction well: 4 subtiles out, the nearest whole subtile is up
@@ -942,9 +962,12 @@ float FirstPerson::steerReach(float dir_x, float dir_y, float reach)
 // game does. Walls in the game's world run along x and y, so that is where sliding goes.
 void FirstPerson::steer(glm::vec2 dir)
 {
+	// With sod.dll's direct movement there is no pointer, so nothing to keep off units: the reach
+	// only has to stop short of walls.
+	const bool direct = m_cmd && (((const CmdHeader*)m_cmd)->dllFlags & CMD_DLL_DIRECT);
 	glm::vec2 pos;
 	if (!playerPlace(&pos)) {
-		const float reach = steerReach(dir.x, dir.y, 4.0f);
+		const float reach = direct ? 4.0f : steerReach(dir.x, dir.y, 4.0f);
 		writeMove(dir.x * reach / STEER_DISTANCE, dir.y * reach / STEER_DISTANCE);
 		m_moving = true;
 		m_move_x = dir.x;
@@ -1004,10 +1027,7 @@ void FirstPerson::steer(glm::vec2 dir)
 		}
 		if (pick < 0) {
 			// nowhere to go: stand at the wall, and keep the camera from leaning into it
-			if (m_moving)
-				writeMove(0.0f, 0.0f);
-			m_moving = false;
-			m_move_x = m_move_y = 0.0f;
+			stopMoving();
 			return;
 		}
 		go = sides[pick];
@@ -1015,7 +1035,7 @@ void FirstPerson::steer(glm::vec2 dir)
 		m_sliding = true;
 	}
 
-	const float reach = steerReach(go.x, go.y, glm::max(clear - 0.5f, 1.0f));
+	const float reach = direct ? glm::max(clear - 0.5f, 1.0f) : steerReach(go.x, go.y, glm::max(clear - 0.5f, 1.0f));
 	writeMove(go.x * reach / STEER_DISTANCE, go.y * reach / STEER_DISTANCE);
 	m_moving = true;
 	m_move_x = go.x;
@@ -1174,10 +1194,7 @@ void FirstPerson::update(bool active)
 		const float yaw = m_yaw, c = cosf(yaw), s = sinf(yaw);
 		steer(glm::normalize(glm::vec2(forward * c - strafe * s, forward * s + strafe * c)));
 	} else {
-		if (m_moving)
-			writeMove(0.0f, 0.0f);
-		m_moving = false;
-		m_move_x = m_move_y = 0.0f;
+		stopMoving();
 	}
 
 	// ---- attacks: held buttons repeat ----
@@ -1826,11 +1843,15 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	};
 
 	// ---- the camera leads the character ----
-	// The game acts on input at its next step, so the character starts 60 to 100 ms after a key
-	// goes down, and after the key comes up it still walks to the nearest point a click can send
-	// it to: 1.5 to 2.8 subtiles, 2.4 on average. The camera hides both. While a key is held it
-	// sits ahead of the character by about that distance, so it starts at once. On release it
-	// stays where it is and the character walks up to it.
+	// The game acts on input at its next step, so the character starts a little after a key goes
+	// down: 40 to 90 ms when sod.dll walks it directly, 60 to 100 ms when it clicks. The camera
+	// hides that. While a key is held it sits ahead of the character by about the ground covered
+	// in that time, so it starts at once. On release it stays where it is and the character walks
+	// up to it: sod.dll sends the character to the camera's spot (STOP_AT, see stopMoving). When it
+	// clicks instead, the character walks on to the nearest point a click can send it to, 1.5 to
+	// 2.8 subtiles, and the lead is longer to match.
+	const bool direct_move = m_cmd && (((const CmdHeader*)m_cmd)->dllFlags & CMD_DLL_DIRECT);
+	const float REST_GAP = 0.75f; // a stopped character this close to the camera leaves it where it is
 	const glm::vec2 body = m_cam_pos;
 	const float frame_dt = glm::clamp((float)(now - m_lead_time), 0.0f, 0.1f);
 	m_lead_time = now;
@@ -1854,7 +1875,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		m_lead_press = now;
 	m_lead_steering = steering;
 	if (steering) {
-		const float lead = glm::clamp(m_lead_speed * 0.16f, 0.5f, 2.6f);
+		const float lead = glm::clamp(m_lead_speed * (direct_move ? 0.08f : 0.16f), 0.5f, 2.6f);
 		// Not into a wall: as far as the way ahead is open, less the room the character itself
 		// needs (it stops a good subtile short of anything solid). Not into a monster or a
 		// townsman either: the character stops in front of them.
@@ -1887,21 +1908,27 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			move *= most / len;
 		m_lead_off += move;
 	} else {
-		// Stay put while the character closes the gap. The gap never grows: a character walking
-		// on past the camera, or off to its side, takes the camera along.
+		// Stay put while the character closes the gap. A character that comes to rest a little past
+		// the camera (the game stops it in the middle of a subtile) leaves the camera where it is;
+		// one that walks on further, or off to the side, takes the camera along.
 		const float before = glm::length(m_lead_off);
 		m_lead_off -= step;
 		const float after = glm::length(m_lead_off);
-		if (after > before && after > 0.0001f)
-			m_lead_off *= before / after;
-		// The character has stopped. Where it stopped short, the camera does not creep back to
-		// it: half a subtile either way is nothing to see, a view that slides after every stop
-		// is. Only a gap larger than that (the character never got there) is closed.
+		const float keep = glm::max(before, REST_GAP);
+		if (after > keep && after > 0.0001f)
+			m_lead_off *= keep / after;
+		// The character has stopped. Where it stopped short, the camera does not creep back to it:
+		// three quarters of a subtile either way is nothing to see (the middle of the subtile under
+		// the camera is never further off than that), a view that slides after every stop is. Only
+		// a larger gap (the character never got there) is closed.
 		const float rest = glm::length(m_lead_off);
-		if (now - m_lead_moved > 0.1 && rest > 0.6f)
-			m_lead_off *= (0.6f + (rest - 0.6f) * expf(-frame_dt / 0.15f)) / rest;
+		if (now - m_lead_moved > 0.1 && rest > REST_GAP)
+			m_lead_off *= (REST_GAP + (rest - REST_GAP) * expf(-frame_dt / 0.15f)) / rest;
 	}
 	m_lead_cam = body + m_lead_off;
+	m_cam_spot_x = m_lead_cam.x;
+	m_cam_spot_y = m_lead_cam.y;
+	m_cam_spot_tick = GetTickCount() | 1;
 
 	const float px = m_lead_cam.x, pz = m_lead_cam.y;
 	if (!m_yaw_valid && player->dir64 >= 0) {
