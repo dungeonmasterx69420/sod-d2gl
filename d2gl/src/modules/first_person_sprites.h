@@ -68,6 +68,7 @@ struct ObjectInfo {
 
 struct MonsterInfo {
 	std::string token;
+	std::string name;              // as the game shows it (Akara, Deckard Cain), for the use prompt
 	std::string kind = "monster"; // "player" for a monster drawn from a character's graphics
 	float shade = 1.0f;            // an Assassin's shadow is her own figure, dark
 	bool hidden = false;           // something the game never shows (a spawner, a vine under the ground)

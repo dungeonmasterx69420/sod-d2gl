@@ -133,6 +133,10 @@ static_assert(sizeof(CmdRecord) == 64, "command record size");
 const float LOOK_SENSITIVITY = 0.0025f;
 const float PITCH_LIMIT = 1.25f;
 const DWORD REPEAT_MS = 280;
+// subtiles: E uses nothing further away. A use is a click on the thing in the game's own view from
+// above, which shows about 25 subtiles out in every direction.
+const float USE_REACH = 20.0f;
+const DWORD USE_HOLD_MS = 1200;  // the longest W A S D still held from before E are kept back
 
 // The real foreground window. GetForegroundWindow is not used: sod.dll answers it on the game's
 // behalf while the game is kept alive in the background.
@@ -914,6 +918,26 @@ void FirstPerson::fire(uint32_t hand)
 	pushRecord(OP_CAST_AT, hand, 0, m_player_x + cosf(yaw) * reach, m_player_y + sinf(yaw) * reach, 0);
 }
 
+// E: use what the view points at (the render thread picks it, see USE_REACH): talk to an NPC, open
+// the stash or a chest, break a jar, take a waypoint or a portal, pick up an item, go through an
+// exit. It is the same as a click on it, so the game walks the character up to it first.
+void FirstPerson::use()
+{
+	AcquireSRWLockShared(&m_use_lock);
+	const bool valid = m_use_valid;
+	const uint32_t type = m_use_type, id = m_use_id;
+	const float x = m_use_x, y = m_use_y;
+	ReleaseSRWLockShared(&m_use_lock);
+	if (!valid)
+		return;
+	// A held W would walk the character off its way there: stop first, and hold the keys back
+	// until they are let go (update).
+	stopMoving();
+	m_use_hold = true;
+	m_use_tick = GetTickCount();
+	pushRecord(OP_INTERACT, 0, type, x, y, id);
+}
+
 // ---- what blocks the way, read from the game's own collision map (game thread) ----
 namespace {
 
@@ -1318,6 +1342,34 @@ void FirstPerson::saveView()
 	fclose(file);
 }
 
+namespace {
+
+// PD2's stash has a search box, and while it has the keyboard E is a letter in it, not a key that
+// closes the stash. ProjectDiablo.dll keeps that in one u32 of its data (0 = the box is not being
+// typed in), found by comparing memory with the box in and out of use. The place holds for that
+// build only: on any other one this answers false, and E leaves the stash to Esc.
+bool stashSearchIdle()
+{
+	static uintptr_t flag = 0;
+	static bool looked = false;
+	if (!looked) {
+		const auto base = (uintptr_t)GetModuleHandleW(L"ProjectDiablo.dll");
+		if (!base)
+			return false;
+		looked = true;
+		IMAGE_DOS_HEADER dos;
+		IMAGE_NT_HEADERS32 nt;
+		if (peek(&dos, (uint32_t)base, sizeof(dos)) && peek(&nt, (uint32_t)(base + dos.e_lfanew), sizeof(nt)) &&
+			nt.FileHeader.TimeDateStamp == 0x6AE709CB && nt.OptionalHeader.SizeOfImage == 0x64D000)
+			flag = base + 0x4BD7D0;
+		trace_log("FirstPerson: stash search flag %s.", flag ? "found" : "unknown in this PD2 build (E will not close the stash)");
+	}
+	uint32_t value = 1;
+	return flag && peek(&value, (uint32_t)flag, sizeof(value)) && value == 0;
+}
+
+} // namespace
+
 void FirstPerson::update(bool active)
 {
 	m_frame_active = active;
@@ -1384,6 +1436,15 @@ void FirstPerson::update(bool active)
 		for (const uint8_t id : panels)
 			panel = panel || flags[id] != 0;
 	}
+	// E closes again what E opens: an NPC's menu (0x08) or shop (0x0C), the waypoint list (0x14),
+	// the stash (0x19). Not while something takes typing, where E is a letter: the chat line
+	// (0x05), the stash's search box. Nor under the Esc menu.
+	m_panel_closable = false;
+	if (active && m_enabled && isVer(V_113c) && !*d2::esc_menu_open && !Menu::instance().isVisible()) {
+		const uint32_t* flags = (const uint32_t*)d2::esc_menu_open - 9;
+		if (!flags[0x05])
+			m_panel_closable = flags[0x19] ? stashSearchIdle() : (flags[0x08] || flags[0x0C] || flags[0x14]);
+	}
 
 	// F10 hands the cursor over and takes it back. What it does always shows: a line on screen
 	// says whose the mouse is, and stays there for as long as the cursor is free. Pressed while a
@@ -1415,7 +1476,14 @@ void FirstPerson::update(bool active)
 	// ---- movement: W A S D relative to where the camera looks ----
 	const float forward = (keyDown('W') ? 1.0f : 0.0f) - (keyDown('S') ? 1.0f : 0.0f);
 	const float strafe = (keyDown('D') ? 1.0f : 0.0f) - (keyDown('A') ? 1.0f : 0.0f);
-	if (forward != 0.0f || strafe != 0.0f) {
+	// After E the game walks the character to what it uses; keys still held from before wait
+	// until they are let go, or for a moment at most.
+	const bool move_keys = keyDown('W') || keyDown('A') || keyDown('S') || keyDown('D');
+	if (m_use_hold && (!move_keys || GetTickCount() - m_use_tick > USE_HOLD_MS))
+		m_use_hold = false;
+	if (m_use_hold) {
+		// waiting: neither steer nor stop (a stop would cancel the walk there)
+	} else if (forward != 0.0f || strafe != 0.0f) {
 		const float yaw = m_yaw, c = cosf(yaw), s = sinf(yaw);
 		steer(glm::normalize(glm::vec2(forward * c - strafe * s, forward * s + strafe * c)));
 	} else {
@@ -1480,6 +1548,28 @@ bool FirstPerson::onMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 		return true;
 	}
 
+	// E uses what the view points at; pressed again while the stash, the waypoint list or an NPC's
+	// menu it opened is up, it closes that (as Esc would). One use per press: a held key's
+	// repeats are taken and dropped.
+	if (msg == WM_KEYDOWN && wParam == 'E' && m_frame_active && (m_look || m_panel_closable)) {
+		if (!(lParam & (1 << 30))) {
+			if (m_look) {
+				use();
+			} else {
+				PostMessageW(App.hwnd, WM_KEYDOWN, VK_ESCAPE, 1 | (0x01 << 16));
+				PostMessageW(App.hwnd, WM_KEYUP, VK_ESCAPE, 1 | (0x01 << 16) | (1u << 30) | (1u << 31));
+			}
+		}
+		m_eat_e_char = true; // its WM_CHAR comes next, and must not reach the game either
+		return true;
+	}
+	if (msg == WM_KEYDOWN)
+		m_eat_e_char = false; // any other key: an E typed into the chat line later is the player's
+	if (msg == WM_CHAR && (wParam == 'e' || wParam == 'E') && m_eat_e_char) {
+		m_eat_e_char = false;
+		return true;
+	}
+
 	if (!m_look)
 		return false;
 
@@ -1488,9 +1578,9 @@ bool FirstPerson::onMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 	switch (msg) {
 		case WM_KEYDOWN:
 		case WM_KEYUP:
-			return wParam == 'W' || wParam == 'A' || wParam == 'S' || wParam == 'D';
+			return wParam == 'W' || wParam == 'A' || wParam == 'S' || wParam == 'D' || wParam == 'E';
 		case WM_CHAR:
-			return wParam == 'w' || wParam == 'a' || wParam == 's' || wParam == 'd' || wParam == 'W' || wParam == 'A' || wParam == 'S' || wParam == 'D';
+			return wParam == 'w' || wParam == 'a' || wParam == 's' || wParam == 'd' || wParam == 'e' || wParam == 'W' || wParam == 'A' || wParam == 'S' || wParam == 'D' || wParam == 'E';
 	}
 	return false;
 }
@@ -2072,6 +2162,71 @@ void FirstPerson::buildWorld(bool mounds)
 	trace_log("FirstPerson: world rebuilt (%u rooms, %u vertices, %u indices, %u batches%s).", count, vertex_at, index_at, (uint32_t)m_batches.size(), mounds ? "" : ", no mounds");
 }
 
+namespace {
+
+// What the E prompt calls the thing E would use: an NPC by name, an item by its name, an object by
+// the name the game shows for it, with a few made shorter ("Your Private Stash" -> STASH). A txt
+// name from an older sod.dll is made readable too ("LargeUrn" -> LARGE URN, "Chest3" -> CHEST).
+std::string useLabel(const UnitRecord& u, const char* strings, size_t strings_size)
+{
+	SpriteStore& store = SpriteStore::Instance();
+	std::string text;
+	switch (u.type) {
+		case 0: return "CORPSE";
+		case 5: return "ENTER";
+		case 1: {
+			const MonsterInfo* info = store.monster(u.txt);
+			text = info && !info->name.empty() ? info->name : "TALK";
+		} break;
+		case 4: {
+			text = "PICK UP";
+			if (u.itemCodeLen && (size_t)u.itemCodeOff + u.itemCodeLen <= strings_size) {
+				std::string code(strings + u.itemCodeOff, u.itemCodeLen);
+				while (!code.empty() && (code.back() == ' ' || code.back() == 0))
+					code.pop_back();
+				if (const std::string* name = store.itemName(code))
+					text += " " + *name;
+			}
+		} break;
+		case 2: {
+			if (u.txt == 59 || u.txt == 60)
+				return "TOWN PORTAL";
+			std::string raw;
+			if (u.nameLen && (size_t)u.nameOff + u.nameLen <= strings_size)
+				raw.assign(strings + u.nameOff, u.nameLen);
+			while (!raw.empty() && (raw.back() == 0 || raw.back() == ' '))
+				raw.pop_back();
+			std::string lower = raw;
+			for (char& ch : lower)
+				ch = (char)tolower((unsigned char)ch);
+			// sod.dll sends the name the game shows; an older one sent the txt name
+			if (lower == "bank" || lower == "your private stash")
+				return "STASH";
+			if (lower == "trappdoor")
+				return "TRAPDOOR";
+			if (lower == "taintedsunaltar")
+				return "ALTAR";
+			if (lower.find("door") != std::string::npos && lower.find("trap") == std::string::npos)
+				return "DOOR"; // the game calls one "Closed Door" even when it stands open
+			for (size_t k = 0; k < raw.size(); k++) {
+				if (k > 0 && isupper((unsigned char)raw[k]) && islower((unsigned char)raw[k - 1]))
+					text += ' ';
+				text += raw[k];
+			}
+			while (!text.empty() && (isdigit((unsigned char)text.back()) || text.back() == ' '))
+				text.pop_back();
+			if (text.empty())
+				text = "USE";
+		} break;
+		default: return "";
+	}
+	for (char& ch : text)
+		ch = (char)toupper((unsigned char)ch);
+	return text;
+}
+
+} // namespace
+
 void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attachment_count)
 {
 	if (!m_base || !initGL() || !readFrame())
@@ -2327,9 +2482,56 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	} else
 		InterlockedExchange(&m_target_valid, 0);
 
+	// What E would use: of the things that can be talked to, opened, picked up or gone through, the
+	// one most straight ahead, a nearer one first when two are about as straight ahead. Wider than
+	// the crosshair's line, so a jar at the feet or a chest just off centre still counts.
+	int use_target = -1;
+	if (looking) {
+		float best = 1e9f;
+		for (uint32_t i = 0; i < unit_count; i++) {
+			const UnitRecord& u = units[i];
+			bool usable = false;
+			switch (u.type) {
+				case 0: usable = u.id != player->id && (u.mode == 0 || u.mode == 17); break; // a corpse: its gear
+				case 1: usable = (u.rawFlags & 0x0010) && u.mode != 0 && u.mode != 12; break; // an NPC
+				case 2: usable = (u.rawFlags & 0x0080) != 0; break; // usable in the state it is in now
+				case 4: // an item on the ground
+				case 5: usable = true; break; // an exit
+			}
+			if (!usable)
+				continue;
+			const glm::vec2 upos = unitPos(u);
+			const float dx = upos.x - px, dz = upos.y - pz;
+			const float along = dx * fx + dz * fz;
+			if (along < 0.3f || along > USE_REACH)
+				continue;
+			const float across = fabsf(dx * fz - dz * fx);
+			if (across > 0.9f + along * 0.45f)
+				continue;
+			const float score = across / glm::max(along, 1.0f) * 6.0f + along * 0.15f;
+			if (score < best) {
+				best = score;
+				use_target = (int)i;
+			}
+		}
+	}
+	AcquireSRWLockExclusive(&m_use_lock);
+	m_use_valid = use_target >= 0;
+	if (use_target >= 0) {
+		const UnitRecord& t = units[use_target];
+		const bool moves = t.type == 0 || t.type == 1 || t.type == 3;
+		m_use_type = t.type;
+		m_use_id = t.id;
+		m_use_x = moves ? (float)t.px / 65536.0f : (float)t.px + 0.5f;
+		m_use_y = moves ? (float)t.py / 65536.0f : (float)t.py + 0.5f;
+	}
+	ReleaseSRWLockExclusive(&m_use_lock);
+
 	// names and codes of this frame's units (weapon class, item codes)
 	const char* strings = (const char*)m_frame_copy.data() + sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord);
 	const size_t strings_size = m_frame_copy.size() - (sizeof(FrameMeta) + sizeof(PlayerRecord) + hdr->maxUnits * sizeof(UnitRecord));
+	// the line under the crosshair: what E would use
+	const std::string use_prompt = use_target >= 0 ? useLabel(units[use_target], strings, strings_size) : std::string();
 
 	// The crosshair turns red on a monster a click would hit at once: any monster for a bow or a
 	// crossbow, one within arm's reach otherwise. Further away the character walks up to it first.
@@ -2487,7 +2689,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		if (u.type == 0 && (u.id == player->id || (fabsf(ux - px) < 1.5f && fabsf(uz - pz) < 1.5f)))
 			continue;
 
-		const bool targeted = (int)i == target && looking;
+		const bool targeted = ((int)i == target || (int)i == use_target) && looking;
 		const float shade = targeted ? 1.25f : 1.0f;
 		const bool dead = u.type == 1 && (u.mode == 0 || u.mode == 12);
 
@@ -2785,7 +2987,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 	// ---- the names of what lies on the ground ----
 	FpText& font = FpText::Instance();
 	const bool show_notice = m_notice[0] && GetTickCount() - m_notice_tick < 1800;
-	if ((!item_labels.empty() || show_notice) && font.ready()) {
+	if ((!item_labels.empty() || show_notice || !use_prompt.empty()) && font.ready()) {
 		static std::vector<FpVertex> plates;
 		static std::vector<FpText::Vertex> letters;
 		plates.clear();
@@ -2830,6 +3032,24 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			for (const int i : order)
 				plates.push_back(corner[i]);
 			font.push(letters, text, -w * 0.5f, y, tall, stretch, { 0.95f, 0.88f, 0.62f });
+		}
+		if (!use_prompt.empty()) {
+			// under the crosshair: the key on a lighter cap, then what it would use
+			const auto plate = [&](float x0, float y0, float x1, float y1, uint8_t shade, uint8_t alpha) {
+				const FpVertex corner[4] = { { x0, y0, 0, shade, shade, shade, alpha, 0, 0 }, { x1, y0, 0, shade, shade, shade, alpha, 0, 0 },
+					{ x1, y1, 0, shade, shade, shade, alpha, 0, 0 }, { x0, y1, 0, shade, shade, shade, alpha, 0, 0 } };
+				static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+				for (const int i : order)
+					plates.push_back(corner[i]);
+			};
+			const float tall = line * 1.15f, y = -0.12f;
+			const float key_w = font.width("E") * tall * stretch, cap_w = key_w + pad_x * 3.0f, gap = pad_x * 2.0f;
+			const float name_w = font.width(use_prompt) * tall * stretch;
+			const float x0 = -(cap_w + gap + name_w) * 0.5f;
+			plate(x0 - pad_x * 2.0f, y - pad_y * 2.5f, x0 + cap_w + gap + name_w + pad_x * 2.0f, y + tall + pad_y * 2.5f, 0, 150);
+			plate(x0, y - pad_y, x0 + cap_w, y + tall + pad_y, 90, 230);
+			font.push(letters, "E", x0 + (cap_w - key_w) * 0.5f, y, tall, stretch, { 1.0f, 0.86f, 0.40f });
+			font.push(letters, use_prompt, x0 + cap_w + gap, y, tall, stretch, { 0.94f, 0.94f, 0.94f });
 		}
 
 		GLint blend_src_rgb = 0, blend_dst_rgb = 0, blend_src_alpha = 0, blend_dst_alpha = 0;

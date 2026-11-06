@@ -153,6 +153,8 @@ bool SpriteStore::loadIndexes()
 		const auto& row = item.value();
 		MonsterInfo& info = m_monsters[txt];
 		info.token = row.value("code", std::string());
+		if (row.contains("name") && row["name"].is_string())
+			info.name = row["name"].get<std::string>();
 		info.hidden = row.value("hidden", false);
 		info.ally = row.value("ally", false);
 		if (row.contains("overlayHeight") && row["overlayHeight"].is_number_integer())

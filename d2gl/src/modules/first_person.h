@@ -87,6 +87,18 @@ class FirstPerson {
 	volatile uint32_t m_target_type = 0, m_target_id = 0, m_target_flags = 0;
 	volatile float m_target_x = 0.0f, m_target_y = 0.0f; // where it is: ids are not unique, the place tells units apart
 
+	// ---- E: what it would use (render thread writes, game thread reads, both under m_use_lock) ----
+	SRWLOCK m_use_lock = SRWLOCK_INIT;
+	bool m_use_valid = false;
+	uint32_t m_use_type = 0, m_use_id = 0;
+	float m_use_x = 0.0f, m_use_y = 0.0f;
+	// game thread only
+	bool m_use_hold = false;          // E sent the character on its way: W A S D wait until they are let go
+	DWORD m_use_tick = 0;
+	bool m_panel_closable = false;    // a panel E opens is up (the stash, the waypoints, an NPC's menu or shop)
+	bool m_eat_e_char = false;        // the WM_CHAR of an E the window procedure took
+	void use();
+
 	// ---- hit marker ----
 	volatile DWORD m_fire_tick = 0;                  // when a mouse button last sent an attack (game thread writes)
 	std::unordered_map<uint32_t, uint32_t> m_unit_life, m_unit_life_next; // living monsters' life, last frame (render thread)
