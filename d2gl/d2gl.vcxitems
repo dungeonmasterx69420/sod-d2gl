@@ -17,10 +17,10 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)src\option\config.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\app.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_hands.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_sprites.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_text.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_tiles.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)src\modules\first_person_viewmodel.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2gl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2\common.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\d2\funcs.cpp" />
@@ -97,10 +97,10 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)src\option\config.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\app.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_hands.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_sprites.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_text.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_tiles.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)src\modules\first_person_viewmodel.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2gl.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2\common.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)src\d2\funcs.h" />

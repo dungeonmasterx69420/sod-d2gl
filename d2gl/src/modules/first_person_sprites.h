@@ -31,8 +31,26 @@ struct SpriteCell {
 	float w = 0, h = 0;
 };
 
+// Where a hand holds an inventory picture (tools/assets/held.py), in picture pixels, y down.
+struct HeldShape {
+	bool valid = false;
+	glm::vec2 axis = { 0.0f, -1.0f }; // unit vector from the bottom end to the top end
+	glm::vec2 line[17];               // centre line, bottom end (0) to top end (16)
+	float guard = -1.0f;              // crossguard, 0..1 from the bottom; < 0 none
+	glm::vec2 center = { 0.0f, 0.0f };
+
+	glm::vec2 pointAt(float f) const
+	{
+		const float pos = glm::clamp(f, 0.0f, 1.0f) * 16.0f;
+		const int k = glm::min((int)pos, 15);
+		return line[k] + (line[k + 1] - line[k]) * (pos - (float)k);
+	}
+};
+
 struct Sprite {
 	GLuint texture = 0;
+	int atlas_w = 0, atlas_h = 0;  // the sheet's size in pixels
+	HeldShape held;                // inventory pictures only
 	int directions = 1, frames = 1;
 	std::vector<SpriteCell> cells; // directions * frames, a direction after another
 	uint8_t dir64[64] = { 0 };     // game direction (0..63) -> direction row
@@ -95,6 +113,19 @@ struct StateInfo {
 	bool aura = false, curse = false;
 };
 
+// What the first-person hands need to know of an item kind (items.json).
+struct ItemArt {
+	std::string inv, uinv, sinv;     // inventory pictures: plain, unique, set
+	std::vector<std::string> types;  // its type and every type it counts as, nearest first
+	int inv_trans = 0;               // the palette shift file a coloured unique or set item uses
+};
+
+// A unique or set item row: its base item, its own picture (may be empty) and its colour (-1 none).
+struct ItemVariant {
+	std::string code, inv;
+	int colour = -1;
+};
+
 struct MissileInfo {
 	std::string cel;
 	bool additive = false;
@@ -140,6 +171,8 @@ class SpriteStore {
 	std::unordered_map<uint32_t, MissileInfo> m_missiles;
 	std::unordered_map<std::string, std::string> m_item_flippies;
 	std::unordered_map<std::string, std::string> m_item_names, m_item_types;
+	std::unordered_map<std::string, ItemArt> m_item_art;
+	std::vector<ItemVariant> m_uniques, m_sets;
 	// overlays.json: optional (an older art service does not write it), so it is tried again later
 	volatile bool m_overlays_ready = false;
 	std::unordered_map<std::string, OverlayInfo> m_overlays;
@@ -175,6 +208,10 @@ public:
 	// An item's plain name ("Short Sword") and its type ("rune", "gold", ...) by item code.
 	const std::string* itemName(const std::string& code) const;
 	const std::string* itemType(const std::string& code) const;
+	// Inventory pictures and types of an item kind; a unique or set row by its number.
+	const ItemArt* itemArt(const std::string& code) const;
+	const ItemVariant* unique(uint32_t row) const;
+	const ItemVariant* setItem(uint32_t row) const;
 	// A state's overlays by state number, and the overlay a skill flashes on whoever uses it.
 	const StateInfo* state(uint32_t id) const;
 	const OverlayInfo* skillCast(uint32_t skill) const;

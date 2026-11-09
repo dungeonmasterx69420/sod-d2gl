@@ -21,7 +21,7 @@
 #include "first_person_sprites.h"
 #include "first_person_text.h"
 #include "first_person_tiles.h"
-#include "first_person_viewmodel.h"
+#include "first_person_hands.h"
 #include "d2/common.h"
 #include "d2/funcs.h"
 #include "helpers.h"
@@ -68,7 +68,12 @@ struct PlayerRecord {
 	uint16_t nameLen, pad0;
 	uint32_t wclassOff;
 	uint16_t wclassLen, pad1;
-	uint32_t reserved[4];
+	struct {
+		char code[4];     // items.txt code, zero padded; all zero for an empty hand (and from an older sod.dll)
+		uint16_t file;    // unique or set row
+		uint8_t quality;  // 5 set, 7 unique
+		uint8_t flags;    // bit 0 ethereal
+	} held[2];            // right hand, left hand
 };
 struct UnitRecord {
 	uint8_t type, pad0;
@@ -2930,11 +2935,21 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		glUniform1f(m_u_textured, 0.0f);
 	}
 
-	// ---- the player's own arms and weapon, over everything in the world ----
+	// ---- the player's own hands and what they hold, over everything in the world ----
 	{
-		ViewModel::State arms;
+		Hands::State arms;
 		if (player->wclassLen && (size_t)player->wclassOff + player->wclassLen <= strings_size)
 			arms.weapon_class.assign(strings + player->wclassOff, player->wclassLen);
+		arms.player_class = player->classId;
+		arms.act = meta->act + 1;
+		Hands::Held* hands[2] = { &arms.right, &arms.left };
+		for (int i = 0; i < 2; i++) {
+			const auto& held = player->held[i];
+			hands[i]->code.assign(held.code, strnlen(held.code, sizeof(held.code)));
+			hands[i]->file = held.file;
+			hands[i]->quality = held.quality;
+			hands[i]->ethereal = (held.flags & 1) != 0;
+		}
 		arms.mode = player->mode;
 		const float frame = player->frameCount >= 256 ? (float)player->gfxFrame / 256.0f : (float)player->gfxFrame;
 		const float frames = player->frameCount >= 256 ? (float)(player->frameCount / 256) : (float)player->frameCount;
@@ -2950,7 +2965,7 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 		m_arms_pitch = pitch;
 		m_arms_look_valid = true;
 		arms.brightness = meta->town ? 1.0f : 0.85f;
-		ViewModel::Instance().render(arms, game_size);
+		Hands::Instance().render(arms, game_size, m_fbo);
 
 		// back to the world's program and buffers for the overlay below
 		glUseProgram(m_program);

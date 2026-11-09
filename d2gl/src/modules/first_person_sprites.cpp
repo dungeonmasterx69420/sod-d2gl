@@ -114,7 +114,46 @@ bool parseLayout(const json& doc, Sprite& sprite)
 	sprite.iso_yaw = doc.value("isoCameraYaw", 3.926991f);
 	sprite.fps = doc.value("fps", 12.5f);
 	sprite.mode = doc.value("mode", std::string());
+
+	// an inventory picture: where a hand holds it
+	if (doc.contains("held") && doc["held"].is_object()) {
+		const auto& held = doc["held"];
+		const auto vec = [](const json& v, glm::vec2& out) {
+			if (!v.is_array() || v.size() != 2 || !v[0].is_number() || !v[1].is_number())
+				return false;
+			out = { v[0].get<float>(), v[1].get<float>() };
+			return true;
+		};
+		HeldShape& shape = sprite.held;
+		shape.valid = vec(held.value("axis", json()), shape.axis) && vec(held.value("center", json()), shape.center) &&
+		              held.contains("line") && held["line"].is_array() && held["line"].size() == 17;
+		for (size_t i = 0; shape.valid && i < 17; i++)
+			shape.valid = vec(held["line"][i], shape.line[i]);
+		shape.guard = held.contains("guard") && held["guard"].is_number() ? held["guard"].get<float>() : -1.0f;
+	}
 	return true;
+}
+
+std::string stringOr(const json& row, const char* key)
+{
+	return row.contains(key) && row[key].is_string() ? row[key].get<std::string>() : std::string();
+}
+
+// uniques / sets in items.json: {code, inv (null = the base item's), colour (-1 none)} by row
+void readVariants(const json& rows, std::vector<ItemVariant>& out)
+{
+	out.clear();
+	if (!rows.is_array())
+		return;
+	for (const auto& row : rows) {
+		ItemVariant v;
+		if (row.is_object()) {
+			v.code = stringOr(row, "code");
+			v.inv = stringOr(row, "inv");
+			v.colour = row.contains("colour") && row["colour"].is_number_integer() ? row["colour"].get<int>() : -1;
+		}
+		out.push_back(v);
+	}
 }
 
 }
@@ -204,7 +243,20 @@ bool SpriteStore::loadIndexes()
 				m_item_names[item.key()] = row["name"].get<std::string>();
 			if (row.contains("type") && row["type"].is_string())
 				m_item_types[item.key()] = row["type"].get<std::string>();
+			if (row.contains("types") && row["types"].is_array()) { // weapons, armour (an index of version 6 or later)
+				ItemArt art;
+				art.inv = stringOr(row, "inv");
+				art.uinv = stringOr(row, "uinv");
+				art.sinv = stringOr(row, "sinv");
+				for (const auto& type : row["types"])
+					if (type.is_string())
+						art.types.push_back(type.get<std::string>());
+				art.inv_trans = row.value("invTrans", 0);
+				m_item_art[item.key()] = art;
+			}
 		}
+		readVariants(items.value("uniques", json()), m_uniques);
+		readVariants(items.value("sets", json()), m_sets);
 	}
 	return true;
 }
@@ -287,6 +339,8 @@ SpriteStore::Result SpriteStore::runJob(const Job& job)
 		stbi_set_flip_vertically_on_load_thread(0);
 		result.pixels = stbi_load((base + ".png").c_str(), &result.width, &result.height, &channels, 4);
 		result.outcome = result.pixels ? 1 : 2;
+		result.sprite.atlas_w = result.width;
+		result.sprite.atlas_h = result.height;
 		if (result.pixels && job.kind == "overlay") {
 			// its colour, for when the picture itself cannot be shown (the player's own aura): the
 			// brighter pixels count for more, as they do when the game adds the picture to the view
@@ -334,6 +388,9 @@ void SpriteStore::workerMain()
 		m_item_flippies.clear();
 		m_item_names.clear();
 		m_item_types.clear();
+		m_item_art.clear();
+		m_uniques.clear();
+		m_sets.clear();
 		std::unique_lock<std::mutex> lock(m_lock);
 		if (m_wake.wait_for(lock, std::chrono::seconds(2), [this] { return m_quit; }))
 			return;
@@ -496,6 +553,24 @@ const std::string* SpriteStore::itemType(const std::string& code) const
 {
 	const auto it = m_item_types.find(code);
 	return it == m_item_types.end() ? nullptr : &it->second;
+}
+
+const ItemArt* SpriteStore::itemArt(const std::string& code) const
+{
+	if (!m_index_ready)
+		return nullptr;
+	const auto it = m_item_art.find(code);
+	return it == m_item_art.end() ? nullptr : &it->second;
+}
+
+const ItemVariant* SpriteStore::unique(uint32_t row) const
+{
+	return m_index_ready && row < m_uniques.size() ? &m_uniques[row] : nullptr;
+}
+
+const ItemVariant* SpriteStore::setItem(uint32_t row) const
+{
+	return m_index_ready && row < m_sets.size() ? &m_sets[row] : nullptr;
 }
 
 const StateInfo* SpriteStore::state(uint32_t id) const
