@@ -22,6 +22,7 @@
 #include "helpers.h"
 #include "modules/first_person.h"
 #include "modules/hd_text.h"
+#include "modules/menu_title.h"
 #include "modules/motion_prediction.h"
 #include "stubs.h"
 
@@ -227,6 +228,7 @@ void uiDrawEnd()
 void __stdcall drawImageHooked(CellContext* cell, int x, int y, uint32_t gamma, int draw_mode, uint8_t* palette)
 {
 	modules::FirstPerson::Instance().traceDraw(1, x, y);
+	modules::MenuTitle::Instance().onImage(1, cell, x, y, draw_mode);
 	if (App.hd_cursor && App.game.draw_stage >= DrawStage::Cursor)
 		return;
 	if (modules::FirstPerson::Instance().isLooking() && App.game.draw_stage >= DrawStage::Cursor)
@@ -250,6 +252,7 @@ void __stdcall drawPerspectiveImageHooked(CellContext* cell, int x, int y, uint3
 void __stdcall drawShiftedImageHooked(CellContext* cell, int x, int y, uint32_t gamma, int draw_mode, int global_palette_shift)
 {
 	modules::FirstPerson::Instance().traceDraw(3, x, y);
+	modules::MenuTitle::Instance().onImage(3, cell, x, y, draw_mode);
 	if (modules::HDText::Instance().drawShiftedImage(cell, x, y)) {
 		auto pos = modules::MotionPrediction::Instance().drawImage(x, y, D2DrawFn::ShiftedImage);
 		drawShiftedImage(cell, pos.x, pos.y, gamma, draw_mode, global_palette_shift);
@@ -259,6 +262,7 @@ void __stdcall drawShiftedImageHooked(CellContext* cell, int x, int y, uint32_t 
 void __stdcall drawVerticalCropImageHooked(CellContext* cell, int x, int y, int skip_lines, int draw_lines, int draw_mode)
 {
 	modules::FirstPerson::Instance().traceDraw(4, x, y);
+	modules::MenuTitle::Instance().onImage(4, cell, x, y, draw_mode);
 	if (modules::HDText::Instance().isActive() && App.game.draw_stage >= DrawStage::UI) {
 		if (y < 150 || (*d2::screen_shift >= SCREENPANEL_LEFT && y < (int)*d2::screen_height - 100 && x < (int)*d2::screen_width / 2))
 			return;
@@ -271,6 +275,7 @@ void __stdcall drawVerticalCropImageHooked(CellContext* cell, int x, int y, int 
 void __stdcall drawClippedImageHooked(CellContext* cell, int x, int y, void* crop_rect, int draw_mode)
 {
 	modules::FirstPerson::Instance().traceDraw(5, x, y);
+	modules::MenuTitle::Instance().onImage(5, cell, x, y, draw_mode);
 	const auto pos = modules::MotionPrediction::Instance().drawImage(x, y, D2DrawFn::ClippedImage);
 	drawClippedImage(cell, pos.x, pos.y, crop_rect, draw_mode);
 }
@@ -278,6 +283,7 @@ void __stdcall drawClippedImageHooked(CellContext* cell, int x, int y, void* cro
 void __stdcall drawImageFastHooked(CellContext* cell, int x, int y, uint8_t palette_index)
 {
 	modules::FirstPerson::Instance().traceDraw(6, x, y);
+	modules::MenuTitle::Instance().onImage(6, cell, x, y, 0);
 	const auto pos = modules::MotionPrediction::Instance().drawImage(x, y, D2DrawFn::ImageFast);
 	drawImageFast(cell, pos.x, pos.y, palette_index);
 }
@@ -295,6 +301,7 @@ void __stdcall drawShadowHooked(CellContext* cell, int x, int y)
 void __stdcall drawSolidRectExHooked(int left, int top, int right, int bottom, uint32_t color, int draw_mode)
 {
 	modules::FirstPerson::Instance().traceDraw(8, left, top);
+	modules::MenuTitle::Instance().beforeDraw();
 	auto offset = modules::MotionPrediction::Instance().drawSolidRect();
 	if (!modules::HDText::Instance().drawSolidRect(left - offset.x, top - offset.y, right - offset.x, bottom - offset.y, color, draw_mode))
 		drawSolidRectEx(left - offset.x, top - offset.y, right - offset.x, bottom - offset.y, color, draw_mode);
@@ -305,6 +312,7 @@ void __stdcall drawSolidRectExHooked(int left, int top, int right, int bottom, u
 void __stdcall drawLineHooked(int x_start, int y_start, int x_end, int y_end, uint8_t color, uint8_t alpha)
 {
 	modules::FirstPerson::Instance().traceDraw(9, x_start, y_start);
+	modules::MenuTitle::Instance().beforeDraw();
 	const auto offset = modules::MotionPrediction::Instance().drawLine(x_start, y_start);
 	drawLine(x_start - offset.x, y_start - offset.y, x_end - offset.x, y_end - offset.y, color, alpha);
 }

@@ -10,6 +10,7 @@ enum class CommandType {
 	DrawIndexed,
 	PreFx,
 	FirstPerson,
+	MenuTitle,
 	Submit,
 	TakeScreenShot,
 };

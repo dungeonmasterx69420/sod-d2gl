@@ -23,6 +23,7 @@
 #include "modules/first_person.h"
 #include "modules/hd_cursor.h"
 #include "modules/hd_text.h"
+#include "modules/menu_title.h"
 #include "modules/mini_map.h"
 #include "modules/motion_prediction.h"
 #include "option/menu.h"
@@ -445,6 +446,9 @@ void Context::renderThread(void* context)
 				case CommandType::FirstPerson:
 					modules::FirstPerson::Instance().render(cmd->m_game_size, ctx->m_game_framebuffer->getId(), ctx->m_game_framebuffer->getAttachmentCount());
 					break;
+				case CommandType::MenuTitle:
+					modules::MenuTitle::Instance().render(cmd->m_game_size, ctx->m_game_framebuffer->getId(), ctx->m_game_framebuffer->getAttachmentCount());
+					break;
 				case CommandType::Begin:
 					if (cmd->m_screen == GameScreen::Movie) {
 						ctx->bindDefaultFrameBuffer();
@@ -767,6 +771,7 @@ void Context::beginFrame()
 		modules::FirstPerson::Instance().traceBegin();
 	}
 	m_fp_pushed = false;
+	modules::MenuTitle::Instance().beginFrame();
 	modules::HDText::Instance().reset();
 	modules::MotionPrediction::Instance().update();
 	if (ISGLIDE3X())
@@ -785,6 +790,7 @@ void Context::bindDefaultFrameBuffer()
 void Context::presentFrame()
 {
 	modules::FirstPerson::Instance().traceEnd(m_frame.vertex_count);
+	modules::MenuTitle::Instance().endFrame();
 	pushFirstPerson();
 	flushVertices();
 	setVertexFlagW(0);
