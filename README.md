@@ -1,3 +1,16 @@
+# Scrolls of Diablo's d2gl
+
+This is Project Diablo 2's d2gl with the first-person view of
+[Scrolls of Diablo](https://github.com/dungeonmasterx69420/ScrollsOfDiablo) added. Our changes are on
+the `sod` branch, mostly in `d2gl/src/modules/first_person*` and `menu_title.*`. `master` follows
+[PD2's d2gl](https://github.com/Project-Diablo-2/d2gl) as it is.
+
+How to build it and put it into the mod's copy of the game is in Scrolls of Diablo's
+[docs/BUILDING.md](https://github.com/dungeonmasterx69420/ScrollsOfDiablo/blob/main/docs/BUILDING.md).
+Like d2gl, it is under the GPL, version 3 or later (see LICENSE.md).
+
+d2gl's own readme follows.
+
 # Diablo 2 LoD Glide/DDraw to OpenGL Wrapper (D2GL)
 [![Github All Releases](https://img.shields.io/github/downloads/bayaraa/d2gl/total.svg)](https://github.com/bayaraa/d2gl/releases) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/bayaraa/d2gl/blob/master/LICENSE.md)
 
