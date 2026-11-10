@@ -2182,6 +2182,9 @@ std::string useLabel(const UnitRecord& u, const char* strings, size_t strings_si
 		case 1: {
 			const MonsterInfo* info = store.monster(u.txt);
 			text = info && !info->name.empty() ? info->name : "TALK";
+			// the game's name for a monster it never named (its "Dummy" string)
+			if (_stricmp(text.c_str(), "an evil force") == 0)
+				text = "TALK";
 		} break;
 		case 4: {
 			text = "PICK UP";
@@ -2498,7 +2501,9 @@ void FirstPerson::render(glm::uvec2 game_size, uint32_t game_fbo, uint32_t attac
 			bool usable = false;
 			switch (u.type) {
 				case 0: usable = u.id != player->id && (u.mode == 0 || u.mode == 17); break; // a corpse: its gear
-				case 1: usable = (u.rawFlags & 0x0010) && u.mode != 0 && u.mode != 12; break; // an NPC
+				// an NPC the game lets you talk to: not the townsfolk, the camp's rogues or a camel,
+				// which are NPCs too but do nothing when clicked
+				case 1: usable = (u.rawFlags & 0x0010) && (u.rawFlags & 0x0200) && u.mode != 0 && u.mode != 12; break;
 				case 2: usable = (u.rawFlags & 0x0080) != 0; break; // usable in the state it is in now
 				case 4: // an item on the ground
 				case 5: usable = true; break; // an exit
