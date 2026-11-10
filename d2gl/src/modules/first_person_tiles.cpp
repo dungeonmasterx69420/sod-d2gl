@@ -40,6 +40,10 @@ const int TILE_W = 160, TILE_H = 80; // a floor tile's diamond, pixels
 // Where things are in the game's memory (1.13c).
 const uint32_t UNIT_ACT = 0x18, UNIT_PATH = 0x2C, PATH_ROOM = 0x1C;
 const uint32_t ROOM_NEAR = 0x00, ROOM_TILES = 0x08, ROOM_NEAR_COUNT = 0x24, ROOM_COORDS = 0x4C;
+// A placed tile the map marks hidden. The game never draws it. These are mostly the invisible
+// walls (Act1\Barracks\InvisWal.dt1, painted in one bright green) that keep the character off a
+// hedge or a ledge in Kurast and elsewhere.
+const uint32_t ENTRY_HIDDEN = 0x08;
 
 #pragma pack(push, 1)
 struct RoomTiles {
@@ -79,6 +83,25 @@ bool safeCopy(void* dst, uint32_t src, size_t size)
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		return false;
 	}
+}
+
+// What a tile is, by its orientation: 0 floor, 1 wall across x, 2 wall across y, 3 upright, 4 roof,
+// -1 not drawn (shadows, markers, the walls of pits). A tile is a diamond on screen: its top corner
+// is the world corner with the smallest x and y. "Left" walls stand on the edge that runs from there
+// along y, "right" walls on the edge that runs along x.
+int tileKind(uint32_t o)
+{
+	if (o == 0)
+		return 0;
+	if (o == 15)
+		return 4;
+	if (o == 2 || o == 3 || o == 6 || o == 9)
+		return 1;
+	if (o == 1 || o == 4 || o == 5 || o == 8)
+		return 2;
+	if (o == 7 || o == 12 || o == 14)
+		return 3;
+	return -1;
 }
 
 inline uint32_t mix(uint32_t h, uint32_t v)
@@ -227,22 +250,11 @@ TileWorld::Art TileWorld::make(uintptr_t, const void* tile_copy)
 	art.data_offset = tile.dwDataPtr;
 	art.name_hash = (uint32_t)(uintptr_t)tile.szTileName;
 
-	// What stands where. A tile is a diamond on screen: its top corner is the world corner with
-	// the smallest x and y. "Left" walls stand on the edge that runs from there along y, "right"
-	// walls on the edge that runs along x.
 	const uint32_t o = tile.dwOrientation;
-	if (o == 0)
-		art.kind = 0;
-	else if (o == 15)
-		art.kind = 4;
-	else if (o == 2 || o == 3 || o == 6 || o == 9)
-		art.kind = 1;
-	else if (o == 1 || o == 4 || o == 5 || o == 8)
-		art.kind = 2;
-	else if (o == 7 || o == 12 || o == 14)
-		art.kind = 3;
-	else
+	const int kind = tileKind(o);
+	if (kind < 0)
 		return art; // shadows, markers, the walls of pits: not drawn
+	art.kind = kind;
 
 	char name[160] = { 0 };
 	for (int i = 0; i < 159; i++) {
@@ -588,21 +600,26 @@ void TileWorld::capture(bool active, bool inside)
 				d2::TileContext tile;
 				if (!entry.tile || !safeCopy(&tile, entry.tile, sizeof(tile)))
 					continue;
+				const int tx = info.coords[4] + entry.tx, ty = info.coords[5] + entry.ty;
+				if (tile.dwOrientation != 0 && tile.dwOrientation != 10 && tile.dwOrientation != 11 && tile.dwOrientation != 13) {
+					// a wall also keeps the tile across its edge clear of walls built from the collision map
+					const int kind = tileKind(tile.dwOrientation);
+					stands(tx, ty);
+					if (kind == 1)
+						stands(tx, ty - 1);
+					else if (kind == 2)
+						stands(tx - 1, ty);
+				}
+				// A hidden wall still counts as standing: where the game shows nothing, no box is built
+				// from the collision map either. It is only not drawn.
+				if (entry.flags & ENTRY_HIDDEN)
+					continue;
 				auto it = m_art.find(entry.tile);
 				if (it == m_art.end() || it->second.data_offset != tile.dwDataPtr || it->second.name_hash != (uint32_t)(uintptr_t)tile.szTileName) {
 					m_art[entry.tile] = make(entry.tile, &tile);
 					it = m_art.find(entry.tile);
 				}
 				const Art& art = it->second;
-				const int tx = info.coords[4] + entry.tx, ty = info.coords[5] + entry.ty;
-				if (tile.dwOrientation != 0 && tile.dwOrientation != 10 && tile.dwOrientation != 11 && tile.dwOrientation != 13) {
-					// a wall also keeps the tile across its edge clear of walls built from the collision map
-					stands(tx, ty);
-					if (art.kind == 1)
-						stands(tx, ty - 1);
-					else if (art.kind == 2)
-						stands(tx - 1, ty);
-				}
 				if (!art.valid)
 					continue;
 
